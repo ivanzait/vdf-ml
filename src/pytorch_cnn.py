@@ -315,7 +315,7 @@ def _parse_threshold_overrides(values, option_name):
 
 class PyTorchCNNClassifier(nn.Module):
     """
-    Classify flattened VDF xz-slice features with a 2D CNN.
+    Classify flattened VDF xz-slice or Hermite-spectra features with a CNN.
 
     Parameters
     ----------
@@ -335,6 +335,24 @@ class PyTorchCNNClassifier(nn.Module):
         Training-feature scales used for standardization.
     adaptive_pool_shape : sequence of int, optional
         Spatial output shape of the final adaptive average pooling layer.
+        Must have 2 values for ``representation="raw_vdf"`` or 3 values for
+        ``representation="hermite"``. Defaults to ``4`` per dimension.
+    representation : {"raw_vdf", "hermite"}, optional
+        Input feature representation. ``"raw_vdf"`` reshapes the flattened
+        feature vector into a square 2D image for ``Conv2d`` layers (the
+        square-image constraint requires ``sqrt(input_size)`` to be an
+        integer). ``"hermite"`` reshapes it into the 3D ``volume_shape`` cube
+        for ``Conv3d`` layers instead.
+    volume_shape : sequence of int, optional
+        Required when ``representation="hermite"``: the
+        ``(order, order, order)`` shape of the Hermite-spectra cube. Its
+        product must equal ``input_size``.
+    hermite_rotate : bool, optional
+        Whether training data was rotated into a ``(B, v_perp, B x v_perp)``
+        frame (``src.vdf_rotation.get_rotated_vdf``) before the Hermite
+        transform. Recorded on the model (and persisted in its checkpoint)
+        purely so inference code can replicate the same preprocessing; it
+        does not affect the network architecture.
     prediction_batch_size : int, optional
         Number of feature rows predicted at once.
     distance_feature_names : sequence of str, optional
@@ -377,7 +395,10 @@ class PyTorchCNNClassifier(nn.Module):
         class_labels,
         feature_mean,
         feature_scale,
-        adaptive_pool_shape=(4, 4),
+        adaptive_pool_shape=None,
+        representation="raw_vdf",
+        volume_shape=None,
+        hermite_rotate=False,
         prediction_batch_size=64,
         distance_feature_names=(),
         distance_hidden_size=8,
@@ -397,13 +418,40 @@ class PyTorchCNNClassifier(nn.Module):
         super().__init__()
 
         self.input_size = int(input_size)
-        self.image_size = int(np.sqrt(self.input_size))
+        self.representation = str(representation).strip().lower()
+        if self.representation not in {"raw_vdf", "hermite"}:
+            raise ValueError("representation must be 'raw_vdf' or 'hermite'")
+
+        if self.representation == "hermite":
+            if volume_shape is None:
+                raise ValueError(
+                    "volume_shape is required when representation is 'hermite'"
+                )
+            self.volume_shape = tuple(int(value) for value in volume_shape)
+            if len(self.volume_shape) != 3 or any(
+                value <= 0 for value in self.volume_shape
+            ):
+                raise ValueError("volume_shape must contain three positive integers")
+            if int(np.prod(self.volume_shape)) != self.input_size:
+                raise ValueError(
+                    "CNN input features must match the product of volume_shape"
+                )
+            conv_ndim = 3
+        else:
+            image_size = int(np.sqrt(self.input_size))
+            if image_size**2 != self.input_size:
+                raise ValueError("CNN input features must form a square image")
+            self.volume_shape = (image_size, image_size)
+            conv_ndim = 2
+
+        self.hermite_rotate = bool(hermite_rotate)
         self.channels = tuple(int(channel) for channel in channels)
         self.classifier_size = int(classifier_size)
         self.dropout = float(dropout)
         self.classes_ = np.asarray(class_labels, dtype=int)
         self.adaptive_pool_shape = _resolve_adaptive_pool_shape(
-            adaptive_pool_shape
+            adaptive_pool_shape,
+            ndim=conv_ndim,
         )
         self.prediction_batch_size = int(prediction_batch_size)
         self.distance_feature_names = tuple(
@@ -436,8 +484,6 @@ class PyTorchCNNClassifier(nn.Module):
             self.classifier_size if fusion_size is None else fusion_size
         )
 
-        if self.image_size ** 2 != self.input_size:
-            raise ValueError("CNN input features must form a square image")
         if not self.channels or any(channel <= 0 for channel in self.channels):
             raise ValueError("channels must contain positive integers")
         if self.classifier_size <= 0:
@@ -508,30 +554,43 @@ class PyTorchCNNClassifier(nn.Module):
             self.vector_feature_mean = None
             self.vector_feature_scale = None
 
+        if conv_ndim == 3:
+            conv_cls, pool_cls, adaptive_pool_cls = (
+                nn.Conv3d,
+                nn.AvgPool3d,
+                nn.AdaptiveAvgPool3d,
+            )
+        else:
+            conv_cls, pool_cls, adaptive_pool_cls = (
+                nn.Conv2d,
+                nn.AvgPool2d,
+                nn.AdaptiveAvgPool2d,
+            )
+
         convolution_layers = []
         input_channels = 1
         for output_channels in self.channels:
             convolution_layers.extend(
                 [
-                    nn.Conv2d(
+                    conv_cls(
                         input_channels,
                         output_channels,
                         kernel_size=3,
                         padding=1,
                     ),
                     nn.ReLU(),
-                    nn.AvgPool2d(kernel_size=2),
+                    pool_cls(kernel_size=2),
                 ]
             )
             input_channels = output_channels
 
-        convolution_layers.append(nn.AdaptiveAvgPool2d(self.adaptive_pool_shape))
+        convolution_layers.append(adaptive_pool_cls(self.adaptive_pool_shape))
         self.convolutions = nn.Sequential(*convolution_layers)
-        pooled_height, pooled_width = self.adaptive_pool_shape
+        pooled_size = int(np.prod(self.adaptive_pool_shape))
         classifier_layers = [
             nn.Flatten(),
             nn.Linear(
-                self.channels[-1] * pooled_height * pooled_width,
+                self.channels[-1] * pooled_size,
                 self.classifier_size,
             ),
             nn.ReLU(),
@@ -793,12 +852,7 @@ class PyTorchCNNClassifier(nn.Module):
         """
 
         features = (features - self.feature_mean) / self.feature_scale
-        images = features.reshape(
-            -1,
-            1,
-            self.image_size,
-            self.image_size,
-        )
+        images = features.reshape(-1, 1, *self.volume_shape)
         convolution_features = self.convolutions(images)
         flattened_features = self.classifier[0](convolution_features)
         hidden_features = self.classifier[1](flattened_features)
@@ -1175,9 +1229,7 @@ def train_pytorch_convolutional_neural_network_classifier(
         int(channel)
         for channel in model_config.get("channels", [16, 32, 64])
     )
-    adaptive_pool_shape = _resolve_adaptive_pool_shape(
-        model_config.get("adaptive_pool_shape", [4, 4])
-    )
+    configured_adaptive_pool_shape = model_config.get("adaptive_pool_shape")
     classifier_size = int(model_config.get("classifier_size", 64))
     dropout = float(model_config.get("dropout", 0.2))
     class_weight = _resolve_class_weight(model_config.get("class_weight", "none"))
@@ -1204,6 +1256,20 @@ def train_pytorch_convolutional_neural_network_classifier(
     if max_epochs <= 0 or patience <= 0 or tolerance < 0.0:
         raise ValueError("Invalid epoch or early-stopping configuration")
 
+    representation = str(
+        config["features"].get("representation", "raw_vdf")
+    ).strip().lower()
+    training_filter_config = config.get("training_filter", {}) or {}
+    if (
+        representation == "hermite"
+        and bool(training_filter_config.get("enabled", False))
+        and str(training_filter_config.get("source", "pca")).lower() == "pca"
+    ):
+        raise ValueError(
+            "PCA-based training_filter is not supported with the 'hermite' "
+            "feature representation"
+        )
+
     _run_training_filter_pca(
         config=config,
         dataset_id=dataset_id,
@@ -1215,6 +1281,10 @@ def train_pytorch_convolutional_neural_network_classifier(
         dataset_id=dataset_id,
         model_id=model_id,
         target_kind="multiclass",
+    )
+    adaptive_pool_shape = _resolve_adaptive_pool_shape(
+        configured_adaptive_pool_shape,
+        ndim=3 if data["representation"] == "hermite" else 2,
     )
     _add_cnn_context_features(
         data=data,
@@ -1350,7 +1420,7 @@ def train_pytorch_convolutional_neural_network_classifier(
             f"  {label}: {class_name}"
             for label, class_name in zip(class_labels, class_names)
         ],
-        f"Input image shape: (1, {model.image_size}, {model.image_size})",
+        f"Input volume shape: (1, {', '.join(str(v) for v in model.volume_shape)})",
         f"Convolution channels: {channels}",
         f"Adaptive pool shape: {adaptive_pool_shape}",
         f"Classifier size: {classifier_size}",
@@ -1410,6 +1480,8 @@ def train_pytorch_convolutional_neural_network_classifier(
     save_training_artifacts(
         output_dir=data["output_dir"],
         preprocessing_values={
+            "representation": np.asarray(data["representation"]),
+            "hermite_rotate": np.asarray(data.get("hermite_rotate", False)),
             "downsample_factor": data["downsample_factor"],
             "dataset_id": dataset_id,
             "model_id": model_id,
@@ -1554,6 +1626,9 @@ def load_pytorch_cnn_checkpoint(
         raise ValueError("Checkpoint class-label count does not match model output")
 
     input_size = int(checkpoint["input_size"])
+    representation = str(checkpoint.get("representation", "raw_vdf"))
+    volume_shape = checkpoint.get("volume_shape")
+    hermite_rotate = bool(checkpoint.get("hermite_rotate", False))
     if format_version == 1:
         distance_feature_names = ()
         vector_feature_names = ()
@@ -1577,7 +1652,10 @@ def load_pytorch_cnn_checkpoint(
         class_labels=class_labels,
         feature_mean=np.zeros(input_size, dtype=np.float32),
         feature_scale=np.ones(input_size, dtype=np.float32),
-        adaptive_pool_shape=checkpoint.get("adaptive_pool_shape", [4, 4]),
+        adaptive_pool_shape=checkpoint.get("adaptive_pool_shape"),
+        representation=representation,
+        volume_shape=volume_shape,
+        hermite_rotate=hermite_rotate,
         prediction_batch_size=prediction_batch_size,
         distance_feature_names=distance_feature_names,
         distance_hidden_size=int(checkpoint.get("distance_hidden_size", 8)),
@@ -1628,6 +1706,9 @@ def save_pytorch_cnn_checkpoint(model, checkpoint_path):
             for name, value in model.state_dict().items()
         },
         "input_size": model.input_size,
+        "representation": model.representation,
+        "volume_shape": list(model.volume_shape),
+        "hermite_rotate": model.hermite_rotate,
         "channels": list(model.channels),
         "classifier_size": model.classifier_size,
         "adaptive_pool_shape": list(model.adaptive_pool_shape),
@@ -2040,6 +2121,9 @@ def _train_cnn_model_for_data(
         feature_mean=np.asarray(scaler.mean_, dtype=np.float32),
         feature_scale=np.asarray(scaler.scale_, dtype=np.float32),
         adaptive_pool_shape=adaptive_pool_shape,
+        representation=data.get("representation", "raw_vdf"),
+        volume_shape=data.get("volume_shape"),
+        hermite_rotate=data.get("hermite_rotate", False),
         prediction_batch_size=prediction_batch_size,
         distance_feature_names=data["distance_feature_names"],
         distance_hidden_size=distance_branch_config["hidden_size"],
@@ -2061,7 +2145,7 @@ def _train_cnn_model_for_data(
     for label, class_name in zip(class_labels, class_names):
         print(f"  {label}: {class_name}")
     print(f"CNN stage: {stage_name}")
-    print(f"CNN input image: {model.image_size} x {model.image_size}")
+    print(f"CNN input volume: {' x '.join(str(v) for v in model.volume_shape)}")
     print(f"Training device: {device}")
 
     training_result = _fit_model(
@@ -4535,17 +4619,19 @@ def _resolve_prediction_batch_size(configured_batch_size, model_batch_size, n_sa
     return min(prediction_batch_size, model_batch_size)
 
 
-def _resolve_adaptive_pool_shape(configured_shape):
+def _resolve_adaptive_pool_shape(configured_shape, ndim=2):
     if configured_shape is None:
-        configured_shape = [4, 4]
+        configured_shape = [4] * ndim
 
     if isinstance(configured_shape, str):
         values = [int(value.strip()) for value in configured_shape.split(",")]
     else:
         values = [int(value) for value in configured_shape]
 
-    if len(values) != 2 or any(value <= 0 for value in values):
-        raise ValueError("adaptive_pool_shape must contain two positive integers")
+    if len(values) != ndim or any(value <= 0 for value in values):
+        raise ValueError(
+            f"adaptive_pool_shape must contain {ndim} positive integers"
+        )
 
     return tuple(values)
 

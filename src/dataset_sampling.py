@@ -1,3 +1,5 @@
+import resource
+import sys
 import time
 
 import numpy as np
@@ -11,6 +13,8 @@ from src.dataset_metadata import (
 )
 from src.timesteps import create_timestep_path
 from src.vdf_extract import VdfExtractor
+from src.hermite_transform import DEFAULT_HERMITE_ORDER, vdf_to_hermite_spectra
+from src.vdf_rotation import get_rotated_vdf
 from src.point_labels import create_point_label_data, iter_labeled_coords
 from src.point_selection import (
     create_point_sample_metadata,
@@ -21,9 +25,12 @@ from src.point_selection import (
 from src.vdf_helpers import (
     R_EARTH,
     create_region_mask_re,
+    get_b_field,
+    get_bulk_velocity,
     get_nearest_vdf_cellid,
     get_region_axis_bounds_re,
     get_vdf_cells_with_coords_re,
+    get_vdf_plot_axes_parameters,
     iter_enabled_regions_re,
 )
 
@@ -81,6 +88,14 @@ def create_timestep_sample_specs_for_timestep(config, timestep):
         raw_x_point_records=point_label_data["raw_x_point_records"],
         raw_o_point_records=point_label_data["raw_o_point_records"],
     )
+    hermite_config = config.get("hermite", {})
+    hermite_enabled = bool(hermite_config.get("enabled", False))
+    hermite_order = int(hermite_config.get("order", DEFAULT_HERMITE_ORDER))
+    hermite_rotate = bool(hermite_config.get("rotate", False))
+    for sample_spec in sample_specs:
+        sample_spec["hermite_enabled"] = hermite_enabled
+        sample_spec["hermite_order"] = hermite_order
+        sample_spec["hermite_rotate"] = hermite_rotate
 
     specs_elapsed = time.perf_counter() - specs_start
     planning_elapsed = time.perf_counter() - planning_start
@@ -764,6 +779,19 @@ def iter_timestep_sample_specs(sample_specs):
     print_memory_usage(f"timestep {timestep} before reader")
     reader = pt.vlsvfile.VlsvReader(str(file_location))
     extractor = VdfExtractor(reader=reader)
+    hermite_enabled = bool(sample_specs[0].get("hermite_enabled", False))
+    v_limits = None
+    hermite_order = DEFAULT_HERMITE_ORDER
+    hermite_rotate = False
+    if hermite_enabled:
+        v_limits, _dv = get_vdf_plot_axes_parameters(
+            reader=reader,
+            vdf_shape=extractor.vdf_shape,
+        )
+        hermite_order = int(
+            sample_specs[0].get("hermite_order", DEFAULT_HERMITE_ORDER)
+        )
+        hermite_rotate = bool(sample_specs[0].get("hermite_rotate", False))
     print_memory_usage(f"timestep {timestep} after reader")
 
     print(f"Timestep {timestep}: extracting {len(sample_specs)} samples")
@@ -772,10 +800,37 @@ def iter_timestep_sample_specs(sample_specs):
         coord_re = sample_spec["coord_re"]
         cid = int(sample_spec["cid"])
 
-        vdf = extractor.extract(cid=cid).astype(np.float32, copy=False)
+        vdf = extractor.extract(cid=cid)
+        if hermite_enabled:
+            vdf_for_hermite = vdf
+            shape_for_hermite = extractor.vdf_shape
+            v_limits_for_hermite = v_limits
+            if hermite_rotate:
+                b_field = get_b_field(reader=reader, cid=cid)
+                bulk_velocity = get_bulk_velocity(reader=reader, cid=cid)
+                (
+                    vdf_for_hermite,
+                    shape_for_hermite,
+                    v_limits_for_hermite,
+                    _rotation_matrix,
+                ) = get_rotated_vdf(
+                    vdf=vdf,
+                    shape=extractor.vdf_shape,
+                    v_limits=v_limits,
+                    b_field=b_field,
+                    bulk_velocity=bulk_velocity,
+                )
+            sample_array = vdf_to_hermite_spectra(
+                vdf=vdf_for_hermite,
+                shape=shape_for_hermite,
+                v_limits=v_limits_for_hermite,
+                order=hermite_order,
+            ).astype(np.float32, copy=False)
+        else:
+            sample_array = vdf.astype(np.float32, copy=False)
 
         yield {
-            "vdf": vdf,
+            "vdf": sample_array,
             "label": sample_spec["label"],
             "metadata": create_sample_metadata_row(
                 sample_spec=sample_spec,
@@ -882,6 +937,9 @@ def create_sample_metadata_row(sample_spec, cid, coord_re, file_location):
         "vdf_coord_re",
         "neighbor_position",
         "timestep",
+        "hermite_order",
+        "hermite_enabled",
+        "hermite_rotate",
         *OMITTED_DATASET_METADATA_COLUMNS,
         *POINT_REFERENCE_METADATA_COLUMNS,
     }
@@ -1033,10 +1091,15 @@ def get_memory_usage_mb():
         Resident set size in megabytes.
     """
 
-    with open("/proc/self/status", "r") as status_file:
-        for line in status_file:
-            if line.startswith("VmRSS:"):
-                value_kb = float(line.split()[1])
-                return value_kb / 1024.0
-
-    return 0.0
+    try:
+        with open("/proc/self/status", "r") as status_file:
+            for line in status_file:
+                if line.startswith("VmRSS:"):
+                    value_kb = float(line.split()[1])
+                    return value_kb / 1024.0
+        return 0.0
+    except FileNotFoundError:
+        # /proc is Linux-only; fall back to getrusage for other platforms
+        # (e.g. macOS, where ru_maxrss is reported in bytes, not KB).
+        max_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return max_rss / (1024.0 * 1024.0) if sys.platform == "darwin" else max_rss / 1024.0

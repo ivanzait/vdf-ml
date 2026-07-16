@@ -513,6 +513,46 @@ def get_min_value_from_file(file_location, cid):
     return float(reader.read_variable("MinValue", int(cid)))
 
 
+def get_b_field(reader, cid):
+    """
+    Read the volume-averaged magnetic field at one spatial cell.
+
+    Parameters
+    ----------
+    reader : analysator.vlsvfile.VlsvReader
+        Open VLSV file reader.
+    cid : int
+        Spatial cell ID.
+
+    Returns
+    -------
+    numpy.ndarray
+        Magnetic field vector ``[Bx, By, Bz]`` in Tesla.
+    """
+
+    return np.asarray(reader.read_variable("B", int(cid)), dtype=float)
+
+
+def get_bulk_velocity(reader, cid):
+    """
+    Read the bulk flow velocity at one spatial cell.
+
+    Parameters
+    ----------
+    reader : analysator.vlsvfile.VlsvReader
+        Open VLSV file reader.
+    cid : int
+        Spatial cell ID.
+
+    Returns
+    -------
+    numpy.ndarray
+        Bulk velocity vector ``[Vx, Vy, Vz]`` in m/s.
+    """
+
+    return np.asarray(reader.read_variable("V", int(cid)), dtype=float)
+
+
 def get_velocity_cell_size_from_extent(extent, vdf_shape, axis="vy"):
     """
     Compute velocity cell size from velocity mesh and VDF shape.

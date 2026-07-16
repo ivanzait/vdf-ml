@@ -10,6 +10,8 @@ from src.dataset_metadata import (
 )
 from src.dataset_plot import plot_vdf_xz_slice
 from src.features import create_features
+from src.hermite_transform import vdf_to_hermite_spectra
+from src.vdf_rotation import get_rotated_vdf
 from src.point_topology import find_point_records
 from src.timesteps import create_path, create_timestep_list
 from src.vdf_extract import VdfExtractor, extract_vdf
@@ -17,10 +19,111 @@ from src.vdf_helpers import (
     R_EARTH,
     create_coordinate_name,
     create_region_mask_re,
+    get_b_field,
+    get_bulk_velocity,
     get_cellid_with_vdf,
     get_vdf_cells_with_coords_re,
+    get_vdf_plot_axes_parameters,
     get_vdf_plot_parameters_from_file,
 )
+
+
+def create_model_features(
+    vdfs,
+    cids,
+    model,
+    reader,
+    downsample_factor,
+    log_eps,
+    n_jobs=1,
+):
+    """
+    Build the feature matrix a trained model expects from raw dense VDFs.
+
+    Mirrors the extraction-time representation choice from
+    ``src.dataset_sampling.iter_timestep_sample_specs``: if the model was
+    trained on Hermite spectra (``model.representation == "hermite"``), each
+    VDF is optionally rotated into a ``(B, v_perp, B x v_perp)`` frame
+    (``model.hermite_rotate``, via ``src.vdf_rotation.get_rotated_vdf``)
+    using the local B and bulk velocity at its cell, then converted with
+    ``src.hermite_transform.vdf_to_hermite_spectra`` using the Hermite order
+    recorded on the model. Otherwise the existing xz-slice/log-scaled
+    feature pipeline is used unchanged.
+
+    Parameters
+    ----------
+    vdfs : numpy.ndarray
+        Raw dense VDF samples with shape ``(n_samples, vx, vy, vz)``.
+    cids : array-like of int
+        Spatial cell ID for each VDF sample, same order as ``vdfs``. Only
+        used in Hermite-rotation mode, to read the local B and bulk
+        velocity.
+    model : object
+        Loaded classifier, optionally exposing ``representation``,
+        ``volume_shape``, and ``hermite_rotate`` attributes.
+    reader : analysator.vlsvfile.VlsvReader
+        Open reader for the source VLSV file, used to read the velocity
+        mesh extent (and, in rotation mode, B and bulk velocity).
+    downsample_factor : int
+        Factor used to downsample the xz slice in raw-VDF mode.
+    log_eps : float
+        Small positive value added before log scaling in raw-VDF mode.
+    n_jobs : int, optional
+        Number of parallel workers for raw-VDF feature extraction.
+
+    Returns
+    -------
+    numpy.ndarray
+        Feature matrix with one row per VDF sample.
+    """
+
+    representation = getattr(model, "representation", "raw_vdf")
+    if representation != "hermite":
+        return create_features(
+            X=vdfs,
+            downsample_factor=downsample_factor,
+            log_eps=log_eps,
+            n_jobs=n_jobs,
+        )
+
+    order = int(model.volume_shape[0])
+    hermite_rotate = bool(getattr(model, "hermite_rotate", False))
+    v_limits, _dv = get_vdf_plot_axes_parameters(
+        reader=reader,
+        vdf_shape=vdfs[0].shape,
+    )
+
+    spectra_rows = []
+    for vdf, cid in zip(vdfs, cids):
+        vdf_for_hermite = vdf
+        shape_for_hermite = vdf.shape
+        v_limits_for_hermite = v_limits
+        if hermite_rotate:
+            b_field = get_b_field(reader=reader, cid=int(cid))
+            bulk_velocity = get_bulk_velocity(reader=reader, cid=int(cid))
+            (
+                vdf_for_hermite,
+                shape_for_hermite,
+                v_limits_for_hermite,
+                _rotation_matrix,
+            ) = get_rotated_vdf(
+                vdf=vdf,
+                shape=vdf.shape,
+                v_limits=v_limits,
+                b_field=b_field,
+                bulk_velocity=bulk_velocity,
+            )
+        spectra_rows.append(
+            vdf_to_hermite_spectra(
+                vdf=vdf_for_hermite,
+                shape=shape_for_hermite,
+                v_limits=v_limits_for_hermite,
+                order=order,
+            )
+        )
+
+    spectra = np.asarray(spectra_rows, dtype=np.float32)
+    return spectra.reshape(len(vdfs), -1)
 
 
 def predict_coordinate(
@@ -100,8 +203,11 @@ def predict_coordinate(
     downsample_factor = int(preprocessing["downsample_factor"])
     log_eps = float(preprocessing["log_eps"])
 
-    features = create_features(
-        X=vdf[None, ...],
+    features = create_model_features(
+        vdfs=vdf[None, ...],
+        cids=[cid],
+        model=model,
+        reader=reader,
         downsample_factor=downsample_factor,
         log_eps=log_eps,
     )
@@ -379,8 +485,11 @@ def predict_region(config, timestep, model_id, load_model, file_source=None):
                     ],
                     dtype=np.float32,
                 )
-                features = create_features(
-                    X=vdfs,
+                features = create_model_features(
+                    vdfs=vdfs,
+                    cids=batch_cellids,
+                    model=model,
+                    reader=reader,
                     downsample_factor=downsample_factor,
                     log_eps=log_eps,
                     n_jobs=feature_n_jobs,

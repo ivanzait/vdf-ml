@@ -14,6 +14,15 @@ labels:
   dayside: 4
 
 features:
+  # raw_vdf: xz-slice + log10 CNN input (default, unaffected by this key when omitted)
+  # hermite: full Hermite-spectra cube CNN input; requires a dataset created
+  #   with hermite.enabled: true in configs/create_dataset.yaml, and is
+  #   incompatible with training_filter.source: pca (see below)
+  representation: raw_vdf
+  #representation: hermite
+  # Must match the dataset's hermite.rotate setting (configs/create_dataset.yaml)
+  # so inference-time extraction (coordinate_prediction.py) can replicate it.
+  hermite_rotate: false
   downsample_factor: 1
   batch_size: 512
   n_jobs: -1
@@ -135,6 +144,10 @@ cnn_embedding_knn:
 
 model:
   channels: [16, 32, 64]
+  # adaptive_pool_shape needs 2 values for features.representation: raw_vdf
+  # (2D CNN) or 3 values for features.representation: hermite (3D CNN), e.g.
+  # [2, 2, 2] for the default hermite.order: 22 with 3 channel blocks above
+  # (each block halves the cube: 22 -> 11 -> 5 -> 2).
   adaptive_pool_shape: [4, 4]
   classifier_size: 64
   topology_mode: auxiliary

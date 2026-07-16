@@ -498,6 +498,15 @@ def load_training_data(config, dataset_id, model_id, target_kind):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     features_config = config["features"]
+    representation = str(
+        features_config.get("representation", "raw_vdf")
+    ).strip().lower()
+    if representation not in {"raw_vdf", "hermite"}:
+        raise ValueError(
+            f"Unsupported feature representation: {representation}. "
+            "Expected 'raw_vdf' or 'hermite'."
+        )
+    hermite_rotate = bool(features_config.get("hermite_rotate", False))
     downsample_factor = int(features_config.get("downsample_factor", 8))
     batch_size = int(features_config.get("batch_size", 64))
     n_jobs = int(features_config.get("n_jobs", 1))
@@ -515,11 +524,22 @@ def load_training_data(config, dataset_id, model_id, target_kind):
     gap_timesteps = int(split_config.get("gap_timesteps", 10))
 
     X, y, metadata = load_dataset(dataset_dir, mmap=True)
-    X_log, cache_metadata = create_or_load_log_slice_cache(
-        X=X,
-        input_config=_create_feature_cache_input_config(log_eps=log_eps),
-        cache_config=cache_config,
-    )
+
+    volume_shape = None
+    if representation == "hermite":
+        if X.ndim != 4:
+            raise ValueError(
+                "Hermite feature representation requires X.npy samples "
+                f"shaped (order, order, order); got sample shape {X.shape[1:]}"
+            )
+        volume_shape = tuple(int(value) for value in X.shape[1:])
+        X_log, cache_metadata = None, {}
+    else:
+        X_log, cache_metadata = create_or_load_log_slice_cache(
+            X=X,
+            input_config=_create_feature_cache_input_config(log_eps=log_eps),
+            cache_config=cache_config,
+        )
 
     print(X.shape)
     print(y.shape)
@@ -553,38 +573,48 @@ def load_training_data(config, dataset_id, model_id, target_kind):
     else:
         raise ValueError(f"Unknown target kind: {target_kind}")
 
-    print("Creating train features")
-    X_train_features = _create_training_feature_matrix(
-        X=X,
-        X_log=X_log,
-        indices=train_indices,
-        downsample_factor=downsample_factor,
-        batch_size=batch_size,
-        n_jobs=n_jobs,
-        log_eps=log_eps,
-    )
+    if representation == "hermite":
+        print("Creating train features")
+        X_train_features = _create_hermite_feature_matrix(X=X, indices=train_indices)
+        print("Creating validation features")
+        X_validation_features = _create_hermite_feature_matrix(
+            X=X, indices=validation_indices
+        )
+        print("Creating test features")
+        X_test_features = _create_hermite_feature_matrix(X=X, indices=test_indices)
+    else:
+        print("Creating train features")
+        X_train_features = _create_training_feature_matrix(
+            X=X,
+            X_log=X_log,
+            indices=train_indices,
+            downsample_factor=downsample_factor,
+            batch_size=batch_size,
+            n_jobs=n_jobs,
+            log_eps=log_eps,
+        )
 
-    print("Creating validation features")
-    X_validation_features = _create_training_feature_matrix(
-        X=X,
-        X_log=X_log,
-        indices=validation_indices,
-        downsample_factor=downsample_factor,
-        batch_size=batch_size,
-        n_jobs=n_jobs,
-        log_eps=log_eps,
-    )
+        print("Creating validation features")
+        X_validation_features = _create_training_feature_matrix(
+            X=X,
+            X_log=X_log,
+            indices=validation_indices,
+            downsample_factor=downsample_factor,
+            batch_size=batch_size,
+            n_jobs=n_jobs,
+            log_eps=log_eps,
+        )
 
-    print("Creating test features")
-    X_test_features = _create_training_feature_matrix(
-        X=X,
-        X_log=X_log,
-        indices=test_indices,
-        downsample_factor=downsample_factor,
-        batch_size=batch_size,
-        n_jobs=n_jobs,
-        log_eps=log_eps,
-    )
+        print("Creating test features")
+        X_test_features = _create_training_feature_matrix(
+            X=X,
+            X_log=X_log,
+            indices=test_indices,
+            downsample_factor=downsample_factor,
+            batch_size=batch_size,
+            n_jobs=n_jobs,
+            log_eps=log_eps,
+        )
 
     print(f"Train features: {X_train_features.shape}")
     print(f"Validation features: {X_validation_features.shape}")
@@ -610,6 +640,9 @@ def load_training_data(config, dataset_id, model_id, target_kind):
         "X_train_features": X_train_features,
         "X_validation_features": X_validation_features,
         "X_test_features": X_test_features,
+        "representation": representation,
+        "volume_shape": volume_shape,
+        "hermite_rotate": hermite_rotate,
         "downsample_factor": downsample_factor,
         "batch_size": batch_size,
         "n_jobs": n_jobs,
@@ -696,6 +729,32 @@ def _create_training_feature_matrix(
         n_jobs=n_jobs,
         log_eps=log_eps,
     )
+
+
+def _create_hermite_feature_matrix(X, indices):
+    """
+    Flatten Hermite-spectra samples into a feature matrix.
+
+    Unlike the raw-VDF path, Hermite coefficients carry sign information and
+    are already a compact representation, so no log-scaling, xz-slicing, or
+    downsampling is applied.
+
+    Parameters
+    ----------
+    X : numpy.ndarray
+        Hermite-spectra samples with shape ``(n_samples, order, order, order)``.
+    indices : array-like of int
+        Sample indices.
+
+    Returns
+    -------
+    numpy.ndarray
+        Feature matrix with shape ``(len(indices), order ** 3)``.
+    """
+
+    indices = np.asarray(indices)
+    samples = np.asarray(X[indices], dtype=np.float32)
+    return samples.reshape(len(indices), -1)
 
 
 def evaluate_model(

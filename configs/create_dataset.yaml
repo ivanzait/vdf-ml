@@ -36,10 +36,6 @@ points:
       x_between: [6.0, 15.0]
       z_abs_max: 8.0
   x_selection:
-    #method: consensus
-    method: union_physical_priority
-    #method: physical
-    #method: manual
     density_variable: rho
     half_width_di:
       eigenvector_0: 2.0
@@ -50,10 +46,6 @@ points:
       y_half_width_re: 0.0
       z_half_width_re: 0.3
   o_selection:
-    #method: consensus
-    method: union_physical_priority
-    #method: physical
-    #method: manual
     core_fraction: 0.7
     y_half_width_re: 0.0
     manual_re:

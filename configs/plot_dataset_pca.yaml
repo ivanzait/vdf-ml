@@ -16,8 +16,8 @@ features:
   cache:
     enabled: false
     dir: data/train/timesteps_{dataset_id}/cache
-    filename: autoencoder_xz_log.npy
-    metadata_filename: autoencoder_xz_log_metadata.npz
+    filename: xz_log_cache.npy
+    metadata_filename: xz_log_cache_metadata.npz
     rebuild: false
     batch_size: 64
     n_jobs: 8

@@ -17,9 +17,9 @@ creation:
   extraction_n_jobs: 1
 
 hermite:
-  enabled: true
+  enabled: false
   order: 22
-  rotate: true
+  rotate: false
 
 points:
   x_class_name: x_point

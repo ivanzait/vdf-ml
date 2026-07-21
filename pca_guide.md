@@ -1,85 +1,145 @@
 # PCA Guide
 
-How PCA is used across this repo. Everything lives in [src/dataset_pca.py](src/dataset_pca.py) (~4900 lines) except two unrelated, unconnected uses noted at the bottom.
+This repo has **two independent PCA pipelines** that don't share code or
+purpose — don't conflate them:
 
-## Role
+1. **Snapshot clustering PCA** (current, actively developed) — blind
+   PCA+KMeans clustering of every VDF in one Vlasiator snapshot, scored
+   against the physics-derived ground truth `extract_data.py` computes.
+   Lives in `scripts/ml_models/{run,plot}_snapshot_pca.py` +
+   `src/ml_models/vdf_snapshot_clustering.py`.
+2. **Legacy CNN-dataset PCA** — a much older, much larger
+   (`src/ml_models/dataset_pca.py`, ~4900 lines) diagnostic/preview tool
+   built around the old static-label dataset format. Its CNN
+   training-filter integration has been **removed**; only its standalone
+   visualization path (`scripts/data_proc/plot_dataset_pca.py`) still runs.
 
-PCA is **not** a standalone model used at inference time. It has two uses:
+See [`schema.md`](schema.md) and README's "Terminology" section for the
+`cluster_phys`/`cluster_ml` distinction both pipelines use.
 
-1. **Training filter for the CNN** — flags and removes noisy/borderline training samples before `train_pytorch_convolutional_neural_network_classifier` runs (`training_filter.source: pca`).
-2. **Standalone diagnostic/visualization** — `scripts/plot_dataset_pca.py`, used to inspect class separability and tune filter thresholds before wiring them into training.
+## 1. Snapshot clustering PCA (current)
 
-PCA is **refit from scratch on every run** — no fitted model is ever pickled/saved (`torch.save`/`joblib.dump`). Only the *output* (scores, metrics, plots) is persisted to disk.
+### Role
 
-## Feature source
+Sanity-checks the physics-driven labels (`cluster_phys`, from
+`extract_data.py`) by asking: does an unsupervised, label-blind PCA+KMeans
+clustering (`cluster_ml`) on the same VDFs recover similar structure? If
+the rarest/most physically distinctive substances (e.g. `current_layer`,
+`magnetosheath`) come out as their own clean blind clusters, that's
+independent evidence the physical labels are capturing something real.
 
-PCA does **not** operate on raw 3D VDFs or Hermite spectra. It runs on the same representation as the `raw_vdf` CNN path: the log10-scaled **xz-slice** of each VDF (`create_pca_feature_cache_input_config`, [src/dataset_pca.py:591](src/dataset_pca.py)), built via the shared cache in [src/autoencoder_data.py](src/autoencoder_data.py) (`create_or_load_log_slice_cache`). Optional `downsample_factor` shrinks the slice before PCA.
+Like the legacy pipeline, PCA is refit from scratch every run — nothing is
+pickled/saved, only the output (`pca_results.npz`, plots) is persisted.
 
-**Consequence:** `training_filter.source: pca` is incompatible with `features.representation: hermite` — enforced by an explicit `ValueError` in [src/pytorch_cnn.py:1256](src/pytorch_cnn.py).
-
-## Backends
-
-Controlled by `pca.backend`:
-
-| Backend | Implementation |
-|---|---|
-| `sklearn` (`incremental`) | `sklearn.decomposition.IncrementalPCA`, `partial_fit` in batches over a `StandardScaler`-scaled matrix |
-| `torch` (default) | `algorithm: lowrank` → `torch.pca_lowrank(x, q=n_components+oversamples, niter=…)`; `algorithm: exact` → `torch.linalg.svd` |
-
-`torch` backend has an optional multi-GPU path (manual sharding + distributed matmuls, `fit_multi_device_lowrank_pca`), with automatic CPU fallback on CUDA OOM.
-
-## CNN training filter — how it decides what to remove
-
-Call chain in `train_pytorch_convolutional_neural_network_classifier` ([src/pytorch_cnn.py:1188](src/pytorch_cnn.py)):
-
-1. **`_run_training_filter_pca`** runs the full `plot_dataset_pca` pipeline (config from `training_filter.pca.*`) before CNN data loading, saving `pca_sample_metrics.csv` under `<model_output_dir>/pca/`.
-2. **`_apply_training_filter`** (source=`pca`) reads that CSV back, joins it against the CNN's actual train split, and applies the filter.
-
-**Rule** (from `add_filter_preview_metrics` in `dataset_pca.py`): for each training sample of a *candidate* class (default `exhaust`, `dayside`), look at its `k_neighbors` (25) nearest neighbors in PCA space (fit on a class-balanced training subset). Flag it for removal if:
-
-- fraction of neighbors from the *point* classes (`x_point`, `o_point`) ≥ `min_point_neighbor_fraction` (0.5, overridable per class — `exhaust: 0.4`, `dayside: 0.6`), **and**
-- fraction of same-class neighbors (`same_class_fraction`) ≤ `max_same_class_fraction` (0.60).
-
-In plain terms: *an exhaust/dayside sample that looks more like x_point/o_point than its own class in PCA space is probably a noisy/borderline label — drop it from training.*
-
-- `protected_classes` (`x_point`, `o_point` by default) are never removed.
-- Removal per class is capped at `max_removed_fraction_per_class` (0.3); among eligible candidates, the worst are removed first (`_rank_pca_filter_candidates`: sort by `point_neighbor_fraction` desc, then `same_class_fraction` asc).
-- `dry_run: true` computes everything but skips the actual removal.
-
-## Standalone visualization
+### Pipeline
 
 ```
-python scripts/plot_dataset_pca.py --config configs/plot_dataset_pca.yaml --timestep 3408_100 --pca-id v0.01
+python scripts/data_proc/extract_data.py             # saves X.npy (+ optionally X_rotated.npy/X_hermite.npy)
+python scripts/ml_models/rebuild_hermite_dataset.py   # only if using "hermite" -- see below
+python scripts/ml_models/run_snapshot_pca.py          # fit PCA+KMeans, save pca_results.npz + cluster_summary.csv
+python scripts/ml_models/plot_snapshot_pca.py          # silhouette/PC1-PC2/spatial/example-VDF/Hermite-verification plots
 ```
 
-Independent of CNN training. Outputs under `<output_dir>/pca[_v<id>]/`:
-- `pca_sample_metrics.csv`, `pca_scores.npz`, `pca_metrics.txt`
-- `pca_train_by_class.png`, `pca_train_neighbor_purity.png`, `pca_filter_preview.png`, `pca_tsne_by_class.png` (t-SNE/UMAP on PCA space)
+All four share `src/data_proc/pipeline_config.py` (`RUN_ID`, `PCA_CONFIG`,
+`HERMITE_ORDER`, `BUILD_ROTATED_DATASET`, `BUILD_HERMITE_DATASET`) — one
+config so every stage agrees on what "this run" means.
 
-Used to eyeball class separability and calibrate `filter_preview` thresholds before enabling the CNN filter.
+### Feature representations — `PCA_CONFIG["feature_representation"]`
 
-## Key config blocks
+| Value | Array clustered | Built by |
+|---|---|---|
+| `"raw"` (default) | `X.npy` — log10-scaled, downsampled `vy=mid` xz-slice of the raw VDF (`ml_models.features.create_feature`) | always (`extract_data.py`) |
+| `"rotated"` | `X_rotated.npy` — same xz-slice/downsample, but every VDF first rotated into its own local `(B, v_perp, B×v_perp)` frame at full resolution (`labeling.snapshot_labeling.rotate_vdfs_to_b_frame`, `physics.vdf_transform.get_rotated_vdf`) | `extract_data.py`, needs `BUILD_ROTATED_DATASET = True` |
+| `"hermite"` | `X_hermite.npy` — the rotated VDF's Hermite spectra, `log10(f/sparsity_threshold)` projected onto a truncated `(order, order, order)` basis (`physics.vdf_transform.vdf_to_hermite_spectra_log`), flattened directly (no slice/downsample — it's already compact) | `extract_data.py` (needs `BUILD_HERMITE_DATASET = True`, which also runs rotation as a prerequisite even if `BUILD_ROTATED_DATASET` is off) — or cheaply **rebuilt at a new `HERMITE_ORDER`** via `rebuild_hermite_dataset.py`, which reuses an already-saved `X_rotated.npy` instead of re-rotating (rotation costs ~3s/VDF; Hermite itself is much cheaper) |
 
-Same schema in [configs/plot_dataset_pca.yaml](configs/plot_dataset_pca.yaml) (top-level) and [configs/train_pytorch_convolutional_neural_network_classifier.yaml](configs/train_pytorch_convolutional_neural_network_classifier.yaml) (nested under `training_filter.pca.*`):
+`"raw"` only intersects a single `vy=mid` plane of the VDF before
+downsampling — a real, pre-existing limitation discovered mid-session (see
+TESTING.md): most of the 3D VDF's information is discarded for that
+representation. `"hermite"` doesn't have this problem — it projects the
+full 3D grid.
 
-- `features.*` — xz-slice cache settings (downsample, log_eps, cache dir).
-- `pca.*` — backend/algorithm/n_components/device.
-- `pca_fit.*` — class-balanced subsampling used only to *fit* PCA (`class_names` excludes `lobe` by default so the majority class doesn't dominate the axes).
-- `neighbor_metrics.*` — `k_neighbors`, batch size, purity-bucket thresholds for reporting.
-- `filter_preview.*` — the actual filter rule: `candidate_classes`, `point_neighbor_classes`, `protected_classes`, `min_point_neighbor_fraction[_by_class]`, `max_same_class_fraction[_by_class]`.
-- `plot.*` / `embedding_plot.*` — visualization toggles (usually off in the CNN training config for speed).
+`run_snapshot_pca.py` raises a clear `FileNotFoundError` if the array a
+chosen mode needs wasn't built for this `RUN_ID`.
 
-`training_filter.*` (CNN config, outside the nested `pca` block) additionally has: `enabled`, `source` (`pca` or `cnn_embedding_knn`), `dry_run`, `candidate_classes`, `point_neighbor_classes`, `protected_classes`, `max_removed_fraction_per_class`.
+### `"hermite"`-only extras
 
-## Alternative: `cnn_embedding_knn` filter
+Only meaningful (and only wired up) when `feature_representation ==
+"hermite"`:
 
-`training_filter.source` is either `pca` or `cnn_embedding_knn` (mutually exclusive). The embedding-kNN path applies the same neighbor-purity idea, but on a trained CNN's penultimate-layer embeddings instead of PCA scores — it's a **separate, independently reimplemented** code path in `pytorch_cnn.py` (not routed through `dataset_pca.py`), requiring a model to already exist (or training an extra "source" model via `run_source_model: true`).
+- **`PCA_CONFIG["sample_normalization"]`** (`"none"` / `"standard"`) — applied to the flattened Hermite features BEFORE `StandardScaler`+PCA (`ml_models.features.normalize_feature_samples`, mean-center + divide by each sample's own std). Fixes a real failure mode: physically complex/structured populations (`current_layer`, `magnetosheath`) have Hermite spectra ~6-9x larger in magnitude than quieter ones (`lobes`/`solar_wind`/`inner_magnetosphere`/`undefined`) at the *same shape* — `StandardScaler` alone (per-feature/column scaling) doesn't remove that per-sample scale, so the two amplitude tiers dominate variance ahead of any shape difference, collapsing KMeans to a degenerate "one outlier vs. everyone" split regardless of `k`. Normalizing per-sample first fixed this (see TESTING.md for the full debugging story).
+- **`PCA_CONFIG["include_moment_features"]`** (bool) — concatenates 7 lower-order physical moments (density, 3 bulk-velocity components, 3 anisotropic thermal-velocity components — `labeling.snapshot_labeling.compute_moment_features_batch`/`MOMENT_FEATURE_COLUMNS`) onto the flattened Hermite features, computed from the same rotated frame. The Hermite spectra deliberately normalize position/width/density away to isolate shape (`vdf_to_hermite_spectra_log`'s u/vth normalization); these moments are exactly that discarded absolute-scale information, added back explicitly. **Not** per-sample normalized themselves (that would erase the real inter-sample scale differences they exist to add back) — `StandardScaler` still puts them on a comparable per-column footing with the Hermite columns before PCA. Requires `rebuild_hermite_dataset.py` to have been run (adds the moment columns to `metadata.csv`); raises a clear `ValueError` otherwise.
+- **`PCA_CONFIG["moment_feature_weight"]`** — post-`StandardScaler` multiplier on just the 7 moment columns (`ml_models.vdf_snapshot_clustering.fit_pca_clusters`'s `feature_weights` param). With only 7 moment columns against ~2700+ Hermite columns (at `HERMITE_ORDER=14`), their aggregate contribution to total variance is diluted by column count alone even though each one individually has unit variance after scaling — weighting compensates. `1.0` = no boost (weighting applied before `StandardScaler` would be pointless: it always resets every column back to unit variance regardless of input scale). `~sqrt(n_hermite_features / 7)` (≈20 at order=14) gives the moments as a group roughly equal total variance to the entire Hermite block. Verified end-to-end: `1.0` exactly reproduces the unweighted result (true no-op); `10.0` measurably improved cluster purity (`magnetosheath`/`current_layer` reached 100% purity, silhouette at k=2 rose from 0.252 to 0.314).
 
-**Shared code between the two filters:** only the final candidate-selection/ranking (`_select_pca_filter_candidates`, `_rank_pca_filter_candidates`) and row-removal (`_remove_training_samples`) functions, both defined once in `pytorch_cnn.py`.
+### Verification tooling
 
-**Conceptual difference:** PCA filter = cheap, unsupervised, pre-training check in a linear subspace of raw VDF features. Embedding filter = same idea, but in the task-supervised space the CNN itself learned.
+`plot_snapshot_pca.py` always produces: `silhouette_by_k.png`,
+`pca_scatter.png` (PC1-vs-PC2, two colorbars: `cluster_phys` and
+`cluster_ml`), `spatial_smallest_clusters.png`, `cluster_vdf_positions.png`,
+`cluster_vdf_examples.png` (one representative VDF per blind cluster).
 
-## Unrelated PCA usages (not part of this pipeline)
+When `feature_representation == "hermite"`, it additionally saves (see
+`plot_tools.plot_cluster_hermite_spectra`):
+- `cluster_hermite_spectra.png` — one representative per **PCA** cluster.
+- `phys_cluster_hermite_spectra.png` — one representative per **physical**
+  label (`cluster_phys`), a broader check that rotation+Hermite behaves
+  sanely across every real category, not just whichever clusters a given
+  run happened to produce.
 
-- [src/autoencoder_plot.py:374](src/autoencoder_plot.py) `plot_latent_pca` — manual `numpy.linalg.svd` 2D projection of the **autoencoder's** latent space, for `latent_pca.png` only.
-- [src/pytorch_cnn.py:3055](src/pytorch_cnn.py) — a throwaway `sklearn.decomposition.PCA(n_components=2)` used purely to get 2D scatter-plot coordinates for CNN embeddings, unrelated to the main PCA pipeline.
+Both show the actual `(order, order, order)` feature array PCA sees (not a
+reconstruction), reduced to 2D per representative by integrating in
+quadrature over the second perpendicular axis (`sqrt(sum(spectra**2,
+axis=2))`) — `spectra[n, m, l]` indexes `(parallel=B, perp1, perp2)`, so
+this collapses to a `(parallel order n, perp order m)` image, the direct
+Hermite-space analogue of reducing a 3D VDF to `(v_parallel, v_perp)` by
+integrating over gyrophase. Each panel is normalized to its own max (a
+shared scale would hide the quiet categories entirely under
+`current_layer`/`magnetosheath`'s larger coefficients).
+
+**How this caught real bugs** (see TESTING.md for full details): plotting
+the actual flattened spectra (not a summary statistic) revealed that an
+early "floor sub-threshold cells at `log10(threshold)`" implementation
+integrated a large constant background over the *entire* velocity-space
+volume (99%+ empty on the fixture), producing 1e9-1e10-magnitude spectra
+dominated by each sample's own basis-function normalization rather than
+its physical shape — fixed by using `log10(vdf/threshold)` instead (zero
+exactly where the VDF has no signal, restoring compact support). The same
+plots later showed that raising `HERMITE_ORDER` alone didn't fix a
+persistent single-outlier clustering split — the per-physical-label
+version showed *why*: `current_layer` and `magnetosheath` genuinely have
+~6-9x larger-magnitude spectra than the other four categories, a real
+physical difference (structured/non-Maxwellian populations vs.
+quiet/near-Maxwellian ones), not a numerical artifact — which is what
+motivated `sample_normalization` and `moment_feature_weight` above.
+
+## 2. Legacy CNN-dataset PCA (`src/ml_models/dataset_pca.py`)
+
+Built around the old static-label dataset format
+(`lobe`/`exhaust`/`o_point`/`x_point`/`dayside`), not the current
+`extract_data.py` pipeline. Two original uses, only one still wired up:
+
+1. ~~Training filter for the CNN~~ — **removed**. The old
+   `training_filter` config block, `_run_training_filter_pca`, and
+   `_apply_training_filter` no longer exist anywhere in
+   `src/ml_models/pytorch_cnn.py` (confirmed by direct search — zero
+   matches). CNN training no longer calls into `dataset_pca.py` at all.
+2. **Standalone diagnostic/visualization** — still functional:
+   ```
+   python scripts/data_proc/plot_dataset_pca.py --config configs/plot_dataset_pca.yaml --timestep 3408_100 --pca-id v0.01
+   ```
+   The filter-preview *metrics and plots* (`add_filter_preview_metrics`,
+   `plot_pca_filter_preview`, neighbor-purity computation, etc.) are all
+   still present in `dataset_pca.py` and still run here — only the "apply
+   this filter to actually drop CNN training samples" wiring was removed.
+   Useful for eyeballing class separability in the old label scheme; not
+   connected to anything else in the current pipeline.
+
+PCA is refit from scratch every run here too (`sklearn.IncrementalPCA` or
+`torch.pca_lowrank`/`torch.linalg.svd`, via `pca.backend`) — see
+`dataset_pca.py`'s own docstrings for backend/config details, which are
+otherwise unchanged from before this session's refactor.
+
+**Feature source**: log10-scaled xz-slice cache
+(`src/ml_models/feature_cache.py`'s `create_or_load_log_slice_cache`),
+same representation as the CNN's `raw_vdf` path — same "only intersects
+`vy=mid`" limitation as the new pipeline's `"raw"` mode above, for the
+same underlying reason.

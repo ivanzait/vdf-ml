@@ -2,7 +2,7 @@ import os
 import numpy as np
 from joblib import Parallel, delayed
 from src.data_proc.batches import create_contiguous_slice, get_array_batch, iter_index_batches
-from src.data_proc.vdf_helpers import create_xz_slice
+from src.data_proc.vdf_tools import create_xz_slice
 
 
 def create_features(X, downsample_factor=8, log_eps=1e-30, n_jobs=1):

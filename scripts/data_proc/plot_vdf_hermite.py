@@ -1,7 +1,13 @@
-#python scripts/plot2Dmap.py
+#python scripts/data_proc/plot_vdf_hermite.py
 #
-# Edit the PARAMETERS block below, then run. No YAML config file involved --
-# reusable plotting logic lives in src/plot_tools.py.
+# Edit the PARAMETERS block below, then run. No YAML config file involved.
+#
+# Manual VDF drill-down: pick cells by spatial box or explicit coordinates,
+# then plot a 2D colormap with those cells marked, each cell's VDF/Hermite-
+# spectrum panel, and a before/after (B, v_perp, B x v_perp) rotation
+# comparison. For "which cells got labeled what" (no Hermite/rotation), use
+# extract_data.py (produces that plot as part of extraction) or
+# verify_data.py instead.
 import os
 import sys
 from pathlib import Path
@@ -30,17 +36,17 @@ from src.data_proc.plot_tools import (
     plot_vdf_rotation_comparison,
     select_vdf_points,
 )
-from src.data_proc.vdf_helpers import get_vdf_cells_with_coords_re
+from src.data_proc.vdf_tools import get_vdf_cells_with_coords_re
 
 # ----------------------------- PARAMETERS -----------------------------
 
 FILE_LOCATION = "/Users/ivanzait/Downloads/bulk.0003408.vlsv"
 RUN_ID = "smoke_test"
-OUTPUT_DIR = PROJECT_ROOT / "data" / "plots" / "plot2Dmap" / RUN_ID
+OUTPUT_DIR = PROJECT_ROOT / "data" / "plots" / "vdf_hermite" / RUN_ID
 
 # Point selection: cells with a VDF inside these Earth-radii bounds are
-# marked distinctly and, if DETAIL_PLOT_ENABLED, get their own VDF/Hermite
-# panel. Set any of these to None to skip that axis's filter.
+# marked distinctly and get their own VDF/Hermite panel. Set any of these to
+# None to skip that axis's filter.
 X_RANGE = (-15.0, -10.0)
 Y_RANGE = None
 Z_RANGE = (-1.0, 1.0)
@@ -66,7 +72,6 @@ COLORMAP_CONFIG = {
 
 HERMITE_ORDER = 22
 POP = "avgs"
-DETAIL_PLOT_ENABLED = True
 ROTATION_COMPARISON_ENABLED = True
 VDF_CMAP = "viridis"
 HERMITE_CMAP = "RdBu_r"
@@ -102,21 +107,23 @@ def main():
     )
     print(f"Saved colormap plot to: {colormap_output_path}")
 
-    if DETAIL_PLOT_ENABLED and len(selected_cellids) > 0:
-        detail_output_path = OUTPUT_DIR / "vdf_and_hermite.png"
-        plot_vdf_and_hermite_grid(
-            reader=reader,
-            cellids=selected_cellids,
-            coords_re=selected_coords_re,
-            order=HERMITE_ORDER,
-            pop=POP,
-            vdf_cmap=VDF_CMAP,
-            hermite_cmap=HERMITE_CMAP,
-            output_path=detail_output_path,
-        )
-        print(f"Saved VDF/Hermite detail plot to: {detail_output_path}")
+    if len(selected_cellids) == 0:
+        return
 
-    if ROTATION_COMPARISON_ENABLED and len(selected_cellids) > 0:
+    detail_output_path = OUTPUT_DIR / "vdf_and_hermite.png"
+    plot_vdf_and_hermite_grid(
+        reader=reader,
+        cellids=selected_cellids,
+        coords_re=selected_coords_re,
+        order=HERMITE_ORDER,
+        pop=POP,
+        vdf_cmap=VDF_CMAP,
+        hermite_cmap=HERMITE_CMAP,
+        output_path=detail_output_path,
+    )
+    print(f"Saved VDF/Hermite detail plot to: {detail_output_path}")
+
+    if ROTATION_COMPARISON_ENABLED:
         rotation_output_path = OUTPUT_DIR / "rotation_comparison.png"
         plot_vdf_rotation_comparison(
             reader=reader,

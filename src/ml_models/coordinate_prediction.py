@@ -7,19 +7,18 @@ from joblib import Parallel, delayed
 from src.data_proc.plot_tools import plot_vdf_xz_slice
 from src.ml_models.features import create_features
 from src.data_proc.config import create_path
-from src.data_proc.vdf_extract import VdfExtractor, extract_vdf
-from src.data_proc.vdf_helpers import (
-    R_EARTH,
+from src.data_proc.physics.vdf_transform import get_rotated_vdf, vdf_to_hermite_spectra
+from src.data_proc.vdf_tools import (
+    VdfExtractor,
     create_coordinate_name,
     create_region_mask_re,
+    extract_vdf,
     get_b_field,
     get_bulk_velocity,
     get_cellid_with_vdf,
-    get_rotated_vdf,
     get_vdf_cells_with_coords_re,
     get_vdf_plot_axes_parameters,
     get_vdf_plot_parameters_from_file,
-    vdf_to_hermite_spectra,
 )
 
 
@@ -36,13 +35,13 @@ def create_model_features(
     Build the feature matrix a trained model expects from raw dense VDFs.
 
     Mirrors the extraction-time representation choice from
-    ``src.data_proc.dataset_sampling.iter_timestep_sample_specs``: if the
+    ``src.deprecated.iter_timestep_sample_specs``: if the
     model was trained on Hermite spectra (``model.representation ==
     "hermite"``), each VDF is optionally rotated into a
     ``(B, v_perp, B x v_perp)`` frame (``model.hermite_rotate``, via
-    ``src.data_proc.vdf_helpers.get_rotated_vdf``) using the local B and
+    ``src.data_proc.physics.vdf_transform.get_rotated_vdf``) using the local B and
     bulk velocity at its cell, then converted with
-    ``src.data_proc.vdf_helpers.vdf_to_hermite_spectra`` using the Hermite
+    ``src.data_proc.physics.vdf_transform.vdf_to_hermite_spectra`` using the Hermite
     order recorded on the model. Otherwise the existing xz-slice/log-scaled
     feature pipeline is used unchanged.
 
@@ -207,10 +206,6 @@ def predict_coordinate(
         downsample_factor=downsample_factor,
         log_eps=log_eps,
     )
-    vdf_coord_re = (
-        np.asarray(reader.get_cell_coordinates(int(cid)), dtype=float)
-        / R_EARTH
-    )
     (
         predicted_labels,
         score_name,
@@ -235,9 +230,6 @@ def predict_coordinate(
         "x_re": float(coord_re[0]),
         "y_re": float(coord_re[1]),
         "z_re": float(coord_re[2]),
-        "vdf_x_re": float(vdf_coord_re[0]),
-        "vdf_y_re": float(vdf_coord_re[1]),
-        "vdf_z_re": float(vdf_coord_re[2]),
         "file_source": resolved_file_source,
         "file_location": str(file_location),
     }

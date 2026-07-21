@@ -7,9 +7,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(PROJECT_ROOT))
 
 from src.data_proc.config import create_timestep_path, load_config
-from src.data_proc.dataset_creation import load_dataset
+from src.data_proc.dataset_io import load_dataset
 from src.data_proc.plot_tools import plot_vdf_xz_slice
-from src.data_proc.vdf_helpers import get_vdf_plot_parameters_from_file
+from src.data_proc.vdf_tools import get_vdf_plot_parameters_from_file
 
 def main(config_path, timestep, sample_index):
     config = load_config(config_path)

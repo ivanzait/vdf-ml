@@ -146,7 +146,7 @@ class PyTorchCNNClassifier(nn.Module):
         product must equal ``input_size``.
     hermite_rotate : bool, optional
         Whether training data was rotated into a ``(B, v_perp, B x v_perp)``
-        frame (``src.data_proc.vdf_helpers.get_rotated_vdf``) before the Hermite
+        frame (``src.data_proc.physics.vdf_transform.get_rotated_vdf``) before the Hermite
         transform. Recorded on the model (and persisted in its checkpoint)
         purely so inference code can replicate the same preprocessing; it
         does not affect the network architecture.
@@ -1145,7 +1145,7 @@ def _plot_failure_cases(data, predictions, class_names_by_label, plot_config):
         return []
 
     from src.data_proc.plot_tools import plot_vdf_xz_slice
-    from src.data_proc.vdf_helpers import get_vdf_plot_parameters_from_file
+    from src.data_proc.vdf_tools import get_vdf_plot_parameters_from_file
 
     splits = _resolve_failure_plot_splits(
         plot_config.get("splits", ["validation", "test"])

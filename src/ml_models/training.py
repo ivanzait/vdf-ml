@@ -16,7 +16,7 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
 from src.ml_models.feature_cache import create_or_load_log_slice_cache, resolve_cache_config
-from src.data_proc.dataset_creation import load_dataset
+from src.data_proc.dataset_io import load_dataset
 from src.ml_models.features import create_features_from_log_slice_cache, create_features_in_batches
 from src.ml_models.model_evaluation import create_lobe_vs_rest_labels, create_predictions_dataframe
 from src.ml_models.model_split import split_by_timestep

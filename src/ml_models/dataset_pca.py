@@ -17,7 +17,7 @@ import torch
 
 from src.ml_models.feature_cache import create_or_load_log_slice_cache, resolve_cache_config
 from src.data_proc.batches import create_contiguous_slice, iter_index_batches
-from src.data_proc.dataset_creation import load_dataset
+from src.data_proc.dataset_io import load_dataset
 from src.ml_models.features import create_log_slice_cache_feature_batch
 from src.ml_models.model_split import split_by_timestep
 from src.data_proc.config import create_timestep_path

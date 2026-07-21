@@ -6,11 +6,12 @@ from matplotlib.path import Path as MplPath
 from scipy.signal import convolve2d
 from shapely import geometry
 
-from src.data_proc.vdf_helpers import R_EARTH, find_matching_region_name_re
+from src.data_proc.vdf_tools import R_EARTH, find_matching_region_name_re, get_b_field
 
 PROTON_MASS = 1.67262192369e-27
 ELEMENTARY_CHARGE = 1.602176634e-19
 MU0 = 4.0e-7 * np.pi
+BOLTZMANN_CONSTANT = 1.380649e-23
 
 
 def find_point_records(reader, flux_file_location, points_config=None):
@@ -133,6 +134,11 @@ def find_point_records(reader, flux_file_location, points_config=None):
                 eigvecs=eigvecs,
             )
             point_record["region_name"] = region_name
+            add_thermal_gyroradius(
+                reader=reader,
+                point_record=point_record,
+                points_config=points_config,
+            )
             o_point_records.append(point_record)
 
     add_o_point_island_contours(
@@ -353,6 +359,53 @@ def compute_ion_inertial_length(number_density):
         np.sqrt(
             PROTON_MASS / (MU0 * number_density * ELEMENTARY_CHARGE**2)
         )
+    )
+
+
+def add_thermal_gyroradius(reader, point_record, points_config):
+    """Add local thermal ion gyroradius (temperature_k, rho_i_m, rho_i_re) to an O-point record, in place."""
+
+    o_selection_config = (points_config or {}).get("o_selection", {})
+    density_variable = o_selection_config.get("density_variable", "rho")
+    cellid = int(point_record["cellid"])
+
+    try:
+        number_density = float(
+            np.asarray(reader.read_variable(density_variable, cellid)).squeeze()
+        )
+        pressure_diagonal = np.asarray(
+            reader.read_variable("PTensorDiagonal", cellid), dtype=float
+        ).squeeze()
+        scalar_pressure = float(np.sum(pressure_diagonal) / 3.0)
+        temperature_k = scalar_pressure / (number_density * BOLTZMANN_CONSTANT)
+        b_magnitude_t = float(np.linalg.norm(get_b_field(reader=reader, cid=cellid)))
+        rho_i_m = compute_thermal_gyroradius(temperature_k, b_magnitude_t)
+    except Exception as error:
+        logging.warning(
+            "Could not compute thermal gyroradius for O point at %s: %s",
+            point_record["coord_re"],
+            error,
+        )
+        point_record["temperature_k"] = None
+        point_record["rho_i_m"] = None
+        point_record["rho_i_re"] = None
+        return
+
+    point_record["temperature_k"] = temperature_k
+    point_record["rho_i_m"] = rho_i_m
+    point_record["rho_i_re"] = rho_i_m / R_EARTH
+
+
+def compute_thermal_gyroradius(temperature_k, b_magnitude_t):
+    """Thermal proton gyroradius in meters, from temperature in K and |B| in T."""
+
+    if temperature_k <= 0:
+        raise ValueError("Temperature must be positive")
+    if b_magnitude_t <= 0:
+        raise ValueError("B magnitude must be positive")
+
+    return float(
+        np.sqrt(PROTON_MASS * BOLTZMANN_CONSTANT * temperature_k) / (ELEMENTARY_CHARGE * b_magnitude_t)
     )
 
 

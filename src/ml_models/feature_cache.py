@@ -5,65 +5,7 @@ from joblib import Parallel, delayed
 import numpy as np
 
 from src.data_proc.batches import iter_index_batches
-from src.data_proc.dataset_creation import load_dataset
 from src.data_proc.config import create_path
-
-
-def create_log_slice_cache_for_dataset(config, dataset_id, model_id=None):
-    """
-    Create or reuse the log-scaled xz-slice cache for a dataset.
-
-    Parameters
-    ----------
-    config : dict
-        Cache creation config.
-    dataset_id : str
-        Dataset identifier.
-    model_id : str, optional
-        Model identifier used only for path templates.
-
-    Returns
-    -------
-    dict
-        Dataset path, cache settings, and cache metadata.
-    """
-
-    if model_id is None:
-        model_id = dataset_id
-
-    dataset_dir = create_path(
-        path_template=config["dataset_dir"],
-        dataset_id=dataset_id,
-        model_id=model_id,
-    )
-    input_config = resolve_input_config(config.get("input", {}))
-    cache_config = resolve_cache_config(
-        config=config.get("cache", {}),
-        dataset_dir=dataset_dir,
-        dataset_id=dataset_id,
-        model_id=model_id,
-    )
-    if not cache_config["enabled"]:
-        raise ValueError("cache.enabled must be true to create a cache")
-
-    X, _, _ = load_dataset(dataset_dir, mmap=True)
-    X_log, cache_metadata = create_or_load_log_slice_cache(
-        X=X,
-        input_config=input_config,
-        cache_config=cache_config,
-    )
-
-    return {
-        "dataset_dir": Path(dataset_dir),
-        "raw_vdf_shape": tuple(int(value) for value in X.shape),
-        "cache_config": cache_config,
-        "cache_metadata": cache_metadata,
-        "cache_shape": (
-            None
-            if X_log is None
-            else tuple(int(value) for value in X_log.shape)
-        ),
-    }
 
 
 def resolve_cache_config(config, dataset_dir, dataset_id, model_id):
@@ -118,48 +60,6 @@ def resolve_cache_config(config, dataset_dir, dataset_id, model_id):
         "rebuild": bool(config.get("rebuild", False)),
         "batch_size": batch_size,
         "n_jobs": n_jobs,
-    }
-
-
-def resolve_input_config(config):
-    """
-    Resolve and validate VDF input preprocessing settings.
-
-    Parameters
-    ----------
-    config : dict
-        Input config values.
-
-    Returns
-    -------
-    dict
-        Validated input settings.
-    """
-
-    slice_name = config.get("slice", "xz")
-    orientation = config.get("orientation", "plot")
-    normalization = config.get("normalization", "train_global_standard")
-    log_eps = float(config.get("log_eps", 1e-30))
-
-    if slice_name != "xz":
-        raise ValueError("Only input.slice='xz' is supported")
-    if orientation != "plot":
-        raise ValueError("Only input.orientation='plot' is supported")
-    if normalization != "train_global_standard":
-        raise ValueError(
-            "Only input.normalization='train_global_standard' is supported"
-        )
-    if log_eps <= 0.0:
-        raise ValueError("input.log_eps must be positive")
-
-    return {
-        "slice": slice_name,
-        "orientation": orientation,
-        "normalization": normalization,
-        "log_eps": log_eps,
-        "clip_negative_to_zero": bool(
-            config.get("clip_negative_to_zero", True)
-        ),
     }
 
 
@@ -478,27 +378,6 @@ def extract_plot_xz_slice_from_dataset(X, sample_index):
 
     mid_y = X.shape[2] // 2
     return np.asarray(X[int(sample_index), :, mid_y, :].T, dtype=np.float32)
-
-
-def extract_plot_xz_slice(vdf):
-    """
-    Extract the plot-oriented middle xz slice from one dense VDF.
-
-    Parameters
-    ----------
-    vdf : numpy.ndarray
-        Dense VDF array with shape ``(vx, vy, vz)``.
-
-    Returns
-    -------
-    numpy.ndarray
-        Plot-oriented xz slice with shape ``(vz, vx)``.
-    """
-
-    vdf_swapped = np.swapaxes(vdf, 2, 0)
-    mid_y = vdf_swapped.shape[1] // 2
-
-    return np.asarray(vdf_swapped[:, mid_y, :], dtype=np.float32)
 
 
 def create_log_plot_xz_slice_from_dataset(

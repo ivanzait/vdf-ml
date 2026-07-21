@@ -9,3 +9,5 @@ vdf-ml-env/
 externals/analysator/
 data/
 slurm/
+.claude/
+.venv/

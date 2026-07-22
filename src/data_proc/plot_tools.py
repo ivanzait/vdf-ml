@@ -1151,13 +1151,20 @@ def plot_combined_clusters(
     # fig.legend (figure-fraction coords), not ax.legend (axes-fraction) --
     # draw_snapshot_colormap's analysator call fixes the axes to an equal
     # aspect ratio, which can leave the axes box much shorter than the
-    # figure for a wide/flat boxre; anchoring to the axes fraction then
-    # under-shoots how far below the actual rendered axes the legend needs
-    # to sit. Figure-fraction coordinates are immune to that.
-    fig.tight_layout(rect=(0, 0.14, 1, 1))
+    # figure for a wide/flat boxre. Pinning the legend to the figure's
+    # bottom edge then leaves a dead gap between the (short, vertically
+    # centered) axes and the legend. Force a draw so get_tightbbox reflects
+    # that aspect-corrected box, then anchor the legend just below the
+    # axes' full rendered extent -- tick labels and the x-axis label
+    # included, not just the bare plotting box (ax.get_position() alone
+    # excludes those and made the legend overlap the x-axis label) -- so it
+    # sits in the gap instead of below it.
+    fig.tight_layout()
+    fig.canvas.draw()
+    axes_bottom_fig_frac = ax.get_tightbbox().transformed(fig.transFigure.inverted()).y0
     fig.legend(
-        handles, labels, loc="lower center", bbox_to_anchor=(0.5, 0.0),
-        borderaxespad=1.0, fontsize=9, ncol=4,
+        handles, labels, loc="upper center", bbox_to_anchor=(0.5, axes_bottom_fig_frac - 0.01),
+        borderaxespad=0.5, fontsize=9, ncol=4,
     )
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)

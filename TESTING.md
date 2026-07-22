@@ -1,12 +1,56 @@
-# Testing `src/data_proc/`
+# Testing `src/data_proc/` and `src/ml_models/`
 
 No automated test suite — the logic is physics-derived (critical-point
-detection, magnetopause fitting, VDF geometry) and easier to validate by eye
-against a real snapshot than to unit-test against synthetic fixtures.
-"Testing" means: run the pipeline stage against the fixture below, and check
-the printed diagnostics / saved plots against each section's "what good
-looks like" notes — so a fresh session doesn't have to re-derive the checks,
-and regressions once caught by eye stay caught.
+detection, magnetopause fitting, VDF geometry, spectral transforms) and
+easier to validate by eye against a real snapshot than to unit-test against
+synthetic fixtures. "Testing" means: run the pipeline stage against the
+fixture below, and check the printed diagnostics / saved plots against each
+section's "what good looks like" notes — so a fresh session doesn't have to
+re-derive the checks, and regressions once caught by eye stay caught.
+
+## Pipeline stages
+
+Production use of this repo moves through six stages. The first four live
+under `src/data_proc/`; PCA analysis lives under `src/ml_models/`; CNN
+training/recognition is future work, not yet wired to this pipeline's
+output.
+
+| # | Stage | What it does | Driven by |
+|---|---|---|---|
+| 1 | **Data extraction** | Read a `.vlsv` snapshot, pull the raw VDF for each VDF-carrying cell | `vdf_tools.py` |
+| 2 | **Processing** | Rotate each VDF into its local `(B, v_perp, B×v_perp)` frame, project onto a Hermite basis in log-space, compute lower-order physical moments | `physics/vdf_transform.py`, `labeling/snapshot_labeling.py` |
+| 3 | **Labelling** | Assign each VDF cell a ground-truth substance: point substances (`x_o_points`/`current_layer`) + base region classification (Shue-model magnetopause/bow-shock) | `physics/point_topology.py`, `physics/current_layer.py`, `physics/magnetopause.py`, `labeling/snapshot_labeling.py` |
+| 4 | **Verification** | Sanity-check labelling by eye: one representative VDF per label, mapped spatially and cut three ways | `scripts/data_proc/verify_data.py` |
+| 5 | **PCA analysis** | Blind PCA+KMeans clustering on a saved dataset, scored against the physical labels | `src/ml_models/vdf_snapshot_clustering.py`, `scripts/ml_models/{run,plot}_snapshot_pca.py` |
+| 6 | *(future)* **CNN training / cluster recognition** | Train a classifier to recognize clusters/substances directly from a VDF | not yet built against this pipeline — see the note at the end of this file |
+
+Stages 1-3 are usually run together and saved in one shot by
+`scripts/data_proc/extract_data.py` (see "Assembling the dataset" below) —
+but each is independently testable without paying for the other two, which
+is the key lever for keeping iteration fast (see the cheat sheet next).
+
+### Processing-time cheat sheet
+
+The expensive step in this whole pipeline is **rotation** (~3s/VDF on this
+fixture's 268³ grid, ~6 minutes for all ~116 VDFs). Everything else —
+extraction, labelling, Hermite transform, moment features, PCA/KMeans
+fitting — is seconds or less. Before re-running anything, check whether a
+cheaper option below already covers the change:
+
+| Testing a change to... | Cheapest way to check it | Only re-run the full thing when... |
+|---|---|---|
+| Extraction (`vdf_tools.py`) | Stage 1's snippet below, on 1-2 cells | The extraction *loop*/CLI wiring in `extract_data.py` itself changed |
+| Rotation math (`get_rotated_vdf`) | `plot_vdf_hermite.py` on an explicit 1-3 cell list (Stage 2) | Confirming rotation looks right across the *whole* sample set, not just a few cells |
+| Hermite order / moment features, given rotation is unchanged | `rebuild_hermite_dataset.py` (reuses a saved `X_rotated.npy`, ~38s-1m18s vs. ~7min) | `X_rotated.npy` doesn't exist yet for this `RUN_ID` |
+| Point substance / region classification logic | `plot_nulls.py` (x_o_points) or a tiny synthetic-array snippet (regions, Stage 3) — neither touches VDF extraction at all | Checking label counts against real fixture geometry (`verify_data.py`, next row) |
+| Labelling as a whole, or any change to Stage 3 | `verify_data.py` — recomputes ground truth from the reader directly and only extracts a *handful* of representative VDFs (one per label), never all ~116, never rotation/Hermite | N/A — this already is the fast path; prefer it over `extract_data.py` for labelling-only changes |
+| PCA config (`feature_representation`, `k_range`, weights, `sample_normalization`) | Re-run `run_snapshot_pca.py`/`plot_snapshot_pca.py` against the existing saved dataset — the PCA/KMeans fit itself is sub-second at ~116 samples | The feature array it needs (`X.npy`/`X_rotated.npy`/`X_hermite.npy`) doesn't exist yet for this `RUN_ID` |
+| Anything, before calling a change done | Full `extract_data.py` run with `BUILD_ROTATED_DATASET`/`BUILD_HERMITE_DATASET` matching what downstream stages need, per PIPELINE.md's orchestrator tier (see "Regression checklist" below) | Always, as the final check — the cheap paths above are for iterating, not for signing off |
+
+`extract_data.py` itself also has a cheap mode: leave
+`BUILD_ROTATED_DATASET = False` and `BUILD_HERMITE_DATASET = False` when
+the change under test doesn't touch rotation or Hermite — extraction +
+labelling alone finishes in seconds, not minutes, on this fixture.
 
 ## Test fixture
 
@@ -28,7 +72,7 @@ run; only relative behavior transfers. Any other small `.vlsv` + matching
 flux `.bin` works if this one becomes unavailable — numbers below are this
 fixture's baseline, not universal constants.
 
-## Stage 1 — VLSV reading + VDF extraction
+## Stage 1 — Data extraction (VLSV reading + raw VDF pull)
 
 File: `vdf_tools.py` (`VdfExtractor`, `get_vdf_cells_with_coords_re`,
 region masks, plot-axis parameters).
@@ -42,6 +86,9 @@ vdf_cellids, vdf_coords_re = get_vdf_cells_with_coords_re(reader)
 extractor = VdfExtractor(reader=reader)
 vdf = extractor.extract(cid=int(vdf_cellids[0]))
 ```
+
+This is the cheapest possible test of extraction logic — one cell, no
+labelling, no rotation, no saving. Runs in well under a second.
 
 **What good looks like:**
 - `vdf_cellids`/`vdf_coords_re` come from the file's own `CELLSWITHBLOCKS`
@@ -57,14 +104,99 @@ vdf = extractor.extract(cid=int(vdf_cellids[0]))
   (`reader.get_velocity_mesh_size`) was read wrong, or the cell doesn't
   actually carry a VDF (check `cid` is in `vdf_cellids`).
 
-## Stage 2 — Point substances: `x_o_points` and `current_layer`
+## Stage 2 — Processing (rotation, Hermite transform, moment features)
 
-Both are point substances (see [`schema.md`](schema.md)); which one(s)
-`extract_data.py`/`verify_data.py` actually compute is a toggle,
-`POINTS_CONFIG["active_point_substances"]` in `pipeline_config.py` — not
-mutually exclusive, both are independently testable.
+Files: `physics/vdf_transform.py` (`get_rotated_vdf`,
+`vdf_to_hermite_spectra_log`, `compute_density`,
+`compute_thermal_velocity_components`), `labeling/snapshot_labeling.py`
+(`rotate_vdfs_to_b_frame`, `compute_hermite_spectra_batch`,
+`compute_moment_features_batch`).
 
-### `x_o_points`
+This stage only matters for the `"rotated"`/`"hermite"` PCA feature
+representations (Stage 5) — skip it entirely if a change only touches
+extraction or labelling.
+
+### Fast test: rotation + Hermite on a handful of cells
+
+`scripts/data_proc/plot_vdf_hermite.py` — edit its `PARAMETERS` block to
+select 1-3 cells (by spatial box or explicit coordinates) and run it. Draws
+a 2D colormap with the selected cells marked, each cell's VDF/Hermite-
+spectrum panel, and a before/after rotation comparison — pays rotation's
+~3s/VDF cost for only the cells you asked for, not the whole fixture.
+
+```
+python scripts/data_proc/plot_vdf_hermite.py
+```
+
+**What good looks like:**
+- The before/after rotation panel: the rotated VDF's bulk-flow direction
+  should align with the plot's marked `v_parallel` axis — a rotation that
+  doesn't visibly straighten the flow means `build_rotation_matrix`/
+  `get_rotated_vdf` regressed.
+- The Hermite-spectrum panel should be smooth/decaying with increasing
+  order for a near-Maxwellian population (`solar_wind`/`lobes`), and
+  visibly more structured (checkerboard-like) for `current_layer`/
+  `magnetosheath` — see the two-tier amplitude note in the failure-mode
+  table below; a *flat* or *noisy-at-every-order* spectrum for any
+  population usually means the log-space patch broke (see below).
+
+### Fast test: retuning `HERMITE_ORDER` or moment features
+
+`scripts/ml_models/rebuild_hermite_dataset.py` — reuses an already-saved
+`X_rotated.npy` for `pipeline_config.RUN_ID` and rebuilds `X_hermite.npy`
+at the current `HERMITE_ORDER`, plus recomputes the moment-feature columns
+in `metadata.csv`. Needs one prior `extract_data.py` run with
+`BUILD_ROTATED_DATASET = True` for this `RUN_ID`; raises a clear
+`FileNotFoundError` otherwise instead of silently re-rotating.
+
+```
+python scripts/ml_models/rebuild_hermite_dataset.py
+```
+
+**What good looks like:**
+- Runtime is seconds to ~1-2 minutes on the fixture (~116 samples),
+  *not* minutes-per-sample — if it's taking rotation-scale time, it's
+  accidentally re-rotating instead of reading `X_rotated.npy`.
+- `X_hermite.npy`'s shape is `(n_samples, order, order, order)` matching
+  the just-edited `HERMITE_ORDER`.
+- Never re-run `extract_data.py` (which would re-pay the ~6-minute
+  rotation cost) just to retune `HERMITE_ORDER` or the moment features —
+  this script exists specifically so that isn't necessary.
+
+### Correctness check: the compact-support / log-space patch
+
+The single most important invariant in this stage: background (below-
+`sparsity_threshold`) cells must map to exactly `0` in the quantity
+projected onto the Hermite basis, not a large floor constant — see the
+"log-floor background-integration bug" entry in the failure-mode table
+below for what breaks if this regresses. `vdf_to_hermite_spectra_log`
+computes `log10(vdf/sparsity_threshold)` (zero for background), never
+`log10(vdf)` floored at `log10(sparsity_threshold)` (a huge, sample-
+dependent constant integrated over the ~99.85%-empty grid).
+
+Visual check: `plot_cluster_hermite_spectra` (called from
+`plot_snapshot_pca.py`, Stage 5, when `feature_representation == "hermite"`)
+plots the literal *flattened* feature vector PCA consumes, reduced to a 2D
+`(parallel order, perp order)` heatmap, one panel per PCA-cluster and per
+physical-label representative. A spectrum that's enormous in magnitude
+(~1e9-1e10) relative to the others is the background-integration bug, not
+real physics; a spectrum that's ~6-9x larger than others but the *same
+qualitative shape* (checkerboard decay) is real — `current_layer`/
+`magnetosheath` are genuinely more structured/non-Maxwellian than
+`solar_wind`/`lobes`.
+
+## Stage 3 — Labelling (point substances + region classification)
+
+Both point substances (see [`schema.md`](schema.md)) and base-region
+classification feed into one label per VDF cell
+(`labeling.snapshot_labeling.combine_ground_truth_labels`). Which point
+substance(s) run is a toggle, `POINTS_CONFIG["active_point_substances"]`
+in `pipeline_config.py` — not mutually exclusive, both are independently
+testable. None of this stage touches VDF arrays directly (it only reads
+`B`, density, and cell coordinates) — it's fast (seconds) even at full
+fixture scale, and is the cheapest stage to iterate on.
+
+### Point substances: `x_o_points`
 
 Files: `physics/point_topology.py` (`find_point_records`),
 `labeling/point_labels.py` (box/circle selection).
@@ -74,7 +206,8 @@ block (`SHOW_X_POINTS`/`SHOW_O_POINTS`, `PLOT_BOXRE`, `REGIONS_RE`,
 `POINTS_CONFIG`) and run it. Draws detected X/O points, their search
 box/circle, and matched-cell counts on a density colormap in one shot.
 Independent of `active_point_substances` — always exercises the detector
-directly.
+directly, and never extracts a single VDF (fastest available test for this
+detector).
 
 ```
 python scripts/data_proc/plot_nulls.py
@@ -103,16 +236,23 @@ python scripts/data_proc/plot_nulls.py
   different from the current B-perpendicular/gyroradius path — don't make
   them match if you're ever reading it for reference.
 
-### `current_layer`
+### Point substances: `current_layer`
 
 File: `physics/current_layer.py` (`find_current_layer_core_records`); the
 final VDF-cell selection itself is `labeling/snapshot_labeling.py`'s
 `find_current_layer_cellids`.
 
-Exercised via `extract_data.py` (Stage 4 below, with `"current_layer"` in
-`active_point_substances`, the default) — no standalone diagnostic script
-exists for this one yet (unlike `plot_nulls.py` for X/O), so watch its
-console output and `all_vdfs.png`.
+No standalone diagnostic script exists for this one yet (unlike
+`plot_nulls.py` for X/O) — that's a documented gap, not a design choice.
+Until one exists, the fastest check is calling
+`find_current_layer_core_records`/`find_current_layer_cellids` directly
+against just a `VlsvReader` in a snippet (seconds, no VDF extraction, no
+saving) rather than running the full `extract_data.py`; watch its console
+output and `all_vdfs.png` either way.
+
+```
+python scripts/data_proc/extract_data.py
+```
 
 A VDF cell is labeled `current_layer` only if its own cellid IS one of the
 peak-`|J|` core cells found by `find_current_layer_core_records` — a direct
@@ -169,13 +309,20 @@ is now the only lever on how large the `current_layer` selection is.
   completely independent methods (peak current-density vs. the Shue
   density-scan fit) and should still agree spatially.
 
-## Stage 3 — Magnetosphere region classification
+### Magnetosphere region classification
 
 File: `physics/magnetopause.py` (`find_subsolar_point`, `fit_shue_model`,
 `shue_boundary_r_re`, `classify_magnetosphere_regions`).
 
-Exercised by `extract_data.py` (Stage 4 below) — its `Label counts:` dict
-and `all_vdfs.png` plot are built from the same Shue fit computed here.
+`classify_magnetosphere_regions` is a pure function of `coords_re` +
+density (no reader/VDF needed at all once you have those two arrays) —
+the fastest way to smoke-test it after a rule change is a tiny synthetic
+`coords_re`/density array in a snippet, checking the returned labels match
+by hand for a few constructed points (e.g. one point just inside `r0`, one
+just outside `lobe_r_min_re`). Against the real fixture, it's exercised by
+`extract_data.py`/`verify_data.py` ("Assembling the dataset" and Stage 4
+below) — its `Label counts:` dict and `all_vdfs.png` plot are built from
+the same Shue fit computed here.
 
 **What good looks like:**
 - The fitted Shue model, independent of the search box (it always scans the
@@ -192,7 +339,7 @@ and `all_vdfs.png` plot are built from the same Shue fit computed here.
   'magnetosheath': 27, 'solar_wind': 20}` (`current_layer` is a point
   substance and overrides whichever base region a cell would otherwise get,
   so it doesn't add to the total the way an X/O-style rare point-count
-  would — see Stage 2's `current_layer` subsection). With
+  would — see the `current_layer` subsection above). With
   `active_point_substances = ["x_o_points"]` instead:
   `{'lobes': 40, 'undefined': 5, 'inner_magnetosphere': 22, 'magnetosheath': 27,
   'solar_wind': 20, 'x_point_o_point': 1, 'x_point': 1}`. Either way, a
@@ -213,35 +360,40 @@ and `all_vdfs.png` plot are built from the same Shue fit computed here.
   magnetosphere is inside it; the blue `r0` circle sits inside that and
   isn't the classification boundary for either label.
 
-## Stage 4 — Dataset creation + verification plots
+## Assembling the dataset (`extract_data.py`)
 
-Files: `scripts/data_proc/extract_data.py` and `verify_data.py` (see
-README "Pipeline"). Edit `src/data_proc/pipeline_config.py` (shared by
-both) to point at the Stage 1 fixture, then:
+Files: `scripts/data_proc/extract_data.py` (see README "Pipeline"). This
+script runs Stages 1-3 together and saves the result — it's the thing
+downstream verification/PCA stages actually consume. Edit
+`src/data_proc/pipeline_config.py` (shared by every downstream script) to
+point at the Stage 1 fixture, then:
 
 ```
-python scripts/data_proc/extract_data.py   # extract + label + stage-1 overview plot
-python scripts/data_proc/verify_data.py    # one representative VDF per label, mapped + cut three ways
+python scripts/data_proc/extract_data.py
 ```
+
+Leave `BUILD_ROTATED_DATASET = False` and `BUILD_HERMITE_DATASET = False`
+unless the change under test specifically needs Stage 2's output — this
+keeps a full run to seconds instead of ~6-7 minutes (see the cheat sheet
+above).
 
 **What good looks like:**
-- `extract_data.py` prints `Loaded N VDFs`, a count line per active point
-  substance (`active_point_substances`), and a `Label counts:` dict that
-  isn't 100% one region — all-one-region usually means
-  `REGIONS_RE`/`POINTS_CONFIG` don't overlap any real structure, or
-  `SPATIAL_BOXRE` is too small/misplaced.
+- Prints `Loaded N VDFs`, a count line per active point substance
+  (`active_point_substances`), and a `Label counts:` dict that isn't 100%
+  one region — all-one-region usually means `REGIONS_RE`/`POINTS_CONFIG`
+  don't overlap any real structure, or `SPATIAL_BOXRE` is too
+  small/misplaced.
 - `X.npy` shape is `(n_samples, vx, vy, vz)`, `n_samples` matches
   `metadata.csv`'s row count; `metadata.csv` has one `label` column (no
   separate `y.npy` — see README's "known gap"), plus per-cell `bx_t`/`by_t`/
   `bz_t`, `vx_ms`/`vy_ms`/`vz_ms`, and the snapshot-constant
   `vspace_*min_ms`/`vspace_*max_ms` velocity-mesh extent (same
-  constant-per-row convention as `timestep`). If
-  `pipeline_config.BUILD_ROTATED_DATASET` was `True` for this run, a second
-  array `X_rotated.npy` (same shape as `X.npy`) is also saved — every VDF
-  rotated into its own local `(B, v_perp, B x v_perp)` frame (see
-  `labeling.snapshot_labeling.rotate_vdfs_to_b_frame`); off by default since
-  it costs real per-sample interpolation time (~3s/VDF on this fixture's
-  268^3 grid, so ~6 minutes for the full smoke-test snapshot).
+  constant-per-row convention as `timestep`). If `BUILD_ROTATED_DATASET`
+  was `True` for this run, a second array `X_rotated.npy` (same shape as
+  `X.npy`) is also saved — see Stage 2 above for its cost. If
+  `BUILD_HERMITE_DATASET` was also `True`, `X_hermite.npy` and the moment
+  feature columns (`hermite_density_m3`, `hermite_ux_ms`/`uy_ms`/`uz_ms`,
+  `hermite_vthx_ms`/`vthy_ms`/`vthz_ms`) land in `metadata.csv` too.
 - `VDF statistic:` block (`min`/`max`/`mean`/`std`, from
   `print_vdf_statistics`): a tiny negative `min` (e.g. `-1e-20` vs. a `max`
   around `1e-10`) is normal float32 noise near zero. What's actually
@@ -259,31 +411,6 @@ python scripts/data_proc/verify_data.py    # one representative VDF per label, m
   fixture and diff `X.npy` (`np.array_equal`) and `metadata.csv`'s `label`
   counts against a pre-change copy.
 
-**Other verification tools** (see README "Pipeline" for the full list):
-`plot_nulls.py` (Stage 2), `plot_vdf_hermite.py` (ad-hoc single-file
-exploration), `run_snapshot_pca.py`/`plot_snapshot_pca.py` (blind PCA+KMeans
-clustering on the saved dataset, scored against `metadata.csv`'s `label`
-column — needs `extract_data.py` to have run first for this `RUN_ID`; good
-result: the smallest clusters overlap heavily with the rarest, most
-physically distinct substances active that run — on the fixture with the
-default `active_point_substances = ["current_layer"]`, that's
-`magnetosheath` and `current_layer`, not `x_point`/`o_point`, which only
-show up when `active_point_substances = ["x_o_points"]` instead. Set
-`PCA_CONFIG["feature_representation"]` to `"rotated"` (needs
-`BUILD_ROTATED_DATASET = True` on the `extract_data.py` run that produced
-this dataset) or `"hermite"` (needs `BUILD_HERMITE_DATASET = True`; note
-this always pulls in rotation as a prerequisite even if
-`BUILD_ROTATED_DATASET` itself was left off) to cluster `X_rotated.npy`/
-`X_hermite.npy` instead of the default `X.npy` — a clear
-`FileNotFoundError` instead of a silent fallback means the array that mode
-needs wasn't built. For `"hermite"`, watch out for a degenerate result: if
-`Best k` collapses to `2` with one giant cluster (~all samples) and one or
-two singleton outliers despite a deceptively *high* silhouette score, that
-usually means the representation is dominated by an overall scale factor
-(density, or a too-high Hermite `order` letting numerically-noisy
-high-order coefficients get amplified by `StandardScaler`) rather than
-shape — this was caught once during development, see the table below.).
-
 **Legacy path** (`src/deprecated.py`'s `create_dataset`, old static label
 scheme, no script wraps it anymore):
 ```python
@@ -296,7 +423,105 @@ create_dataset(config=load_config("configs/create_dataset_local_smoke.yaml"),
 `X.npy`/`y.npy`/`metadata.csv` triple; `plot_dataset_sample.py`'s
 `--timestep` templates into `configs/plot_dataset_sample.yaml`'s
 `dataset_dir` (`data/train/timesteps_{timestep}`) — point `--config` at a
-matching YAML if you used the smoke config to create the dataset.
+matching YAML if you used the smoke config to create the dataset. This is
+also the dataset format `train_cnn.py` (Stage 6, future) currently expects
+— see the note at the end of this file.
+
+## Stage 4 — Verification (`verify_data.py`)
+
+File: `scripts/data_proc/verify_data.py`. Recomputes ground truth directly
+from the reader (same call as Stage 3's `compute_snapshot_ground_truth`) —
+it does **not** need `extract_data.py` to have been run first, and only
+extracts a handful of representative VDFs (one per label), never all
+~116 — cheaper than a full `extract_data.py` run, and the preferred check
+for any labelling-only change.
+
+```
+python scripts/data_proc/verify_data.py
+```
+
+**What good looks like:**
+- Prints `M VDF cells across K labels`, then `Representative cells: [...]`
+  — `K` should match the number of distinct labels active this run (base
+  regions + whichever point substance(s) `active_point_substances` selects).
+- `vdf_positions.png`: each representative's marker sits inside the region
+  its label implies (e.g. a `magnetosheath` marker between the two Shue
+  circles, a `current_layer` marker on the dot cloud from Stage 3) — a
+  marker sitting somewhere that contradicts its own label means Stage 3's
+  labelling and this plot's cellid lookup have drifted apart.
+- `vdf_examples.png`: each representative's three velocity-space cuts
+  (vx-vy, vx-vz, vy-vz) show a contiguous blob, not scattered noise or an
+  empty panel — same peak-slicing caveat as "Assembling the dataset" above
+  (fast-flowing populations need their own peak index, not the mesh
+  center).
+
+See also `plot_nulls.py` (Stage 3, X/O sanity) and `plot_vdf_hermite.py`
+(Stage 2, manual VDF/Hermite/rotation drill-down) for other verification
+angles this script doesn't cover.
+
+## Stage 5 — PCA analysis
+
+Files: `src/ml_models/vdf_snapshot_clustering.py`,
+`scripts/ml_models/run_snapshot_pca.py`/`plot_snapshot_pca.py`. Needs a
+saved dataset from "Assembling the dataset" above for this `RUN_ID` — the
+PCA/KMeans fit itself is sub-second at ~116 samples, so iterating on
+`PCA_CONFIG` never needs a re-extraction, only a re-run of these two
+scripts. See [`pca_guide.md`](pca_guide.md) for the full pipeline
+(feature representations, per-sample normalization, moment-feature
+weighting) — this section is the testing checklist, not the design doc.
+
+```
+python scripts/ml_models/run_snapshot_pca.py
+python scripts/ml_models/plot_snapshot_pca.py
+```
+
+**What good looks like:**
+- Blind PCA+KMeans clustering on the saved dataset, scored against
+  `metadata.csv`'s `label` column — good result: the smallest clusters
+  overlap heavily with the rarest, most physically distinct substances
+  active that run — on the fixture with the default
+  `active_point_substances = ["current_layer"]`, that's `magnetosheath`
+  and `current_layer`, not `x_point`/`o_point`, which only show up when
+  `active_point_substances = ["x_o_points"]` instead.
+- `PCA_CONFIG["feature_representation"]`: `"raw"` uses `X.npy` (always
+  present); `"rotated"` needs `BUILD_ROTATED_DATASET = True` on the
+  `extract_data.py` run that produced this dataset; `"hermite"` needs
+  `BUILD_HERMITE_DATASET = True` (this always pulls in rotation as a
+  prerequisite even if `BUILD_ROTATED_DATASET` itself was left off). A
+  clear `FileNotFoundError` instead of a silent fallback means the array
+  that mode needs wasn't built — re-run "assembling the dataset" (or, for
+  `"hermite"` alone, just `rebuild_hermite_dataset.py`, Stage 2) with the
+  right flags rather than treating this as a bug.
+- For `"hermite"`, watch out for a degenerate result: if `Best k` collapses
+  to `2` with one giant cluster (~all samples) and one or two singleton
+  outliers despite a deceptively *high* silhouette score, that usually
+  means the representation is dominated by an overall scale factor
+  (density, or a too-high Hermite `order` letting numerically-noisy
+  high-order coefficients get amplified by `StandardScaler`) rather than
+  shape — this was caught once during development, see the failure-mode
+  table below. `include_moment_features`/`moment_feature_weight` and
+  `sample_normalization` (Stage 2's per-sample scale removal) are the two
+  levers that fixed this in this project's history — don't reach for a
+  higher `HERMITE_ORDER` first, that's a different knob (basis truncation,
+  not scale).
+- `cluster_hermite_spectra.png`/`phys_cluster_hermite_spectra.png` (only
+  produced when `feature_representation == "hermite"`): visual check
+  described in Stage 2's "Correctness check" above, applied to whichever
+  clusters/labels this run actually produced.
+
+## Stage 6 (future) — CNN training / cluster recognition
+
+Not yet built against this pipeline. `scripts/ml_models/train_cnn.py`/
+`predict_region.py`/`predict_coordinate.py` exist but currently target the
+**legacy** dataset format (`src/deprecated.py`'s `create_dataset`, old
+static label scheme — see "Legacy path" above), not the substance taxonomy
+`extract_data.py`/PCA analysis use now. There is no current test coverage
+for training a CNN on Stage 5's clusters or the current label set — treat
+any such request as new-feature work, not a regression check, until this
+stage is actually wired up. When it is, extend this section with the same
+pattern as Stage 5: a "what good looks like" checklist, and a cheat-sheet
+entry for the fastest way to test a training-only change without
+re-running extraction/rotation/Hermite.
 
 ## Known failure modes (caught during development — check these don't regress)
 
@@ -316,19 +541,30 @@ If a change touches the area named, re-check the specific symptom.
 | Lowering `core_fraction` to catch a weak real structure (e.g. the tail sheet) also pulls in a couple of points right next to the inner boundary, at high `|z|` relative to `|x|` | `physics/current_layer.py` (`find_current_layer_core_records`) | Field-aligned currents near the inner simulation boundary are a different physical structure (mapped along B to the ionosphere, not a cross-field current sheet), but a `dayside`/`tail` x-only split doesn't exclude them — they can sit inside either box and, once the threshold is lowered enough, compete with the box's real peak. Recognizable by `R = sqrt(x_re**2 + z_re**2)` a few R_E (on the fixture, `R ~ 4.6 R_E` vs. `R >= 8.2 R_E` for real detections) and by a suspiciously exact, uniform density across all of them (a boundary-condition fill value, not physically-varying plasma). Fixed by `current_layer_selection["min_r_re"]`, excluding cells within that radius of Earth from every sub-region's search before any peak is computed. |
 | `all_vdfs.png`'s only cutoff circle is labeled/positioned at `r0` even though `inner_magnetosphere`/`lobes` were classified against a different radius (`lobe_r_min_re`) | `plot_tools.py` (`draw_shue_boundaries`) | An early version repurposed the single `show_r0_circle` toggle to draw `lobe_r_min_re` *instead of* `r0` when the two differed -- conflating two genuinely different physical quantities (the fitted magnetopause standoff vs. an independently-chosen classification radius) into one circle. Fixed by drawing them as two separate, independently-toggled circles (`show_r0_circle` always draws `r0`; a new `lobe_r_min_re` param draws its own circle, distinct style, only if given), so neither is ever silently swapped for the other. |
 | `feature_representation = "hermite"` PCA collapses to `Best k = 2`, one giant cluster (nearly all samples) plus one or two singleton outliers, despite a *higher* silhouette score than the raw-pixel baseline | `ml_models/vdf_snapshot_clustering.py` (`fit_pca_clusters`'s `StandardScaler`) vs. `physics/vdf_transform.py` (`vdf_to_hermite_spectra`) | The raw (non-log) Hermite spectra of a VDF scale ~linearly with that VDF's own density (the `(0,0,0)` coefficient IS, up to a constant, the density) -- u/vth normalization removes position/width as confounds but not overall amplitude. `StandardScaler` treats every coefficient as equally informative, so the one or two samples with genuinely unusual density dominate variance and every other coefficient (the real shape information) gets drowned out -- the "scale, not shape" confound this representation was meant to fix, just showing up through density instead of pixel position. Fixed by projecting `log10(vdf)` instead of the raw linear `vdf` (`vdf_to_hermite_spectra_log`, log-compresses the dynamic range the same way the raw-pixel feature path already does) rather than trying to normalize the raw spectra after the fact. |
+| Log-space Hermite spectra have magnitude ~1e9-1e10, dwarfing every other sample, even after the log fix above | `physics/vdf_transform.py` (`vdf_to_hermite_spectra_log`) | Substituting `log10(sparsity_threshold)` as a literal floor value for background cells (instead of subtracting it) integrates a huge sample-independent constant against every Hermite basis function over the ~99.85%-empty grid — the result is dominated by each sample's own basis-normalization overlap with that constant, not real VDF shape. Fixed by computing `log10(vdf/sparsity_threshold)` so background cells map to exactly `0` (compact support preserved), not a large floor value. |
+| Two independent PCA runs on the same physical clusters give visibly different-scale results with no config change, tracing back to `current_layer`/`magnetosheath` specifically | `ml_models/vdf_snapshot_clustering.py` / feature engineering | Not a bug — a genuine two-tier physical amplitude difference: `current_layer`/`magnetosheath` (structured, non-Maxwellian) have Hermite spectra ~6-9x larger in magnitude than `lobes`/`solar_wind`/`inner_magnetosphere`/`undefined` (quiet, near-Maxwellian), confirmed via `plot_cluster_hermite_spectra` to be the *same qualitative shape*, just different scale. Fixed (where it caused degenerate clustering) via per-sample normalization (`sample_normalization = "standard"`) before the per-feature `StandardScaler`. |
 
-## Regression checklist after refactoring `data_proc`
+## Regression checklist after refactoring `data_proc`/`ml_models`
 
 This is the **local** verification tier — see `PIPELINE.md`'s "Two
 verification tiers" for when this is enough vs. when a full repo-wide
-orchestrator pass is warranted instead.
+orchestrator pass is warranted instead. Use the cheat sheet near the top of
+this file to pick the cheapest command that actually exercises the stage(s)
+touched — don't default to a full `extract_data.py` run while iterating.
 
 1. `python -m py_compile` every touched file — catches syntax/import errors
    only, not wiring mistakes.
-2. Re-run the actual stage(s) touched against the Stage 1 fixture (this
-   file's per-stage commands above).
-3. If the change could affect dataset output: diff `X.npy`/`y.npy`
-   (`np.array_equal`) and `metadata.csv` against a pre-change copy (Stage 4).
-4. If the change could affect a plot: actually open the saved PNG and look
+2. Re-run the actual stage(s) touched, using the cheapest tool from the
+   cheat sheet above (a single-cell snippet, `plot_nulls.py`,
+   `plot_vdf_hermite.py`, `rebuild_hermite_dataset.py`, or `verify_data.py`
+   — not necessarily the full pipeline) while iterating.
+3. Before considering the change done: run the **full** `extract_data.py`
+   (with `BUILD_ROTATED_DATASET`/`BUILD_HERMITE_DATASET` matching what
+   downstream stages need) against the fixture once, as the orchestrator-
+   tier sign-off.
+4. If the change could affect dataset output: diff `X.npy`/`X_rotated.npy`/
+   `X_hermite.npy` (`np.array_equal`) and `metadata.csv`'s `label` counts
+   against a pre-change copy.
+5. If the change could affect a plot: actually open the saved PNG and look
    at it. Every failure mode in the table above was caught this way, not by
    reading the diff.

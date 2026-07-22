@@ -1,0 +1,341 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{caption}
+\usepackage{subcaption}
+
+\title{VDF Classification: Investigation Progress}
+\author{}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This study reports preliminary results on clusterization of the
+Vlasiator 2D global simulation, with the idea of identification of the
+magnetospheric regions. The practical goal for now is to sanity-check
+the extraction, labelling, and PCA pipelines end to end before scaling
+to a full production run. Section~\ref{sec:data-processing} describes
+the expert-based region detection and the labelling strategies (116
+VDFs across six substances). Section~\ref{sec:pca} reports blind
+PCA+KMeans clustering on the Hermite spectra of the VDFs, with
+lower-order physical moments (density, bulk velocity, anisotropic
+thermal velocity) added as explicit features. The best-scoring split
+($k=2$) recovers a cluster containing \emph{all} \texttt{magnetosheath}
+and \emph{all} \texttt{current\_layer} samples (100\% recall of both),
+at 81\% purity within that cluster -- these VDFs could be considered
+``disturbed'' plasma. The complementary cluster is 100\% pure
+calm-plasma labels.
+\end{abstract}
+
+\tableofcontents
+
+% ---------------------------------------------------------------------
+\section{Data processing}
+\label{sec:data-processing}
+% Stage: selecting where VDFs are pulled from a snapshot, and assigning
+% each one its physics-derived ground-truth label. Corresponds to
+% TESTING.md Stages 1-3 ("data extraction" / "processing" / "labelling").
+
+\subsection{Smoke-test snapshot and VDF extraction}
+All results below are from \texttt{RUN\_ID = smoke\_test}: one local
+Vlasiator timestep (\texttt{bulk.0003408.vlsv}), a sparse, coarse 2D
+$xz$-plane run ($y \equiv 0$) chosen deliberately for fast pipeline
+iteration rather than physical realism -- $\sim$2880 VDF-carrying cells
+over the whole domain, $\sim$2.35~$R_E$ spacing. Extraction was
+restricted to a search box \texttt{SPATIAL\_BOXRE~=~[-30, 30, -5, 5]}
+$R_E$ ($x$, $z$), a band straddling the dayside magnetopause and the
+near tail. 116 VDF-carrying cells fell inside that box and were
+extracted with \texttt{VdfExtractor} at the snapshot's native
+velocity-mesh resolution ($4\times4\times4$ blocks/cell). Figure
+\ref{fig:all-vdfs} shows their spatial distribution together with the
+labels assigned in Section~\ref{sec:labelling}.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.85\textwidth]{../data/plots/extract_data/smoke_test/all_vdfs.png}
+\caption{Extracted VDF cells, colored by ground-truth label, smoke\_test
+run. Blue dashed circle: fitted Shue standoff $r_0$. Cyan dotted circle:
+\texttt{lobe\_r\_min\_re}. Pink dot cloud: the current-layer core's
+dense-grid extent; pink diamonds: the VDF cells actually labelled
+\texttt{current\_layer}.}
+\label{fig:all-vdfs}
+\end{figure}
+
+\subsection{Labelling}
+\label{sec:labelling}
+
+\subsubsection{Finding the magnetopause and bow shock}
+Both boundaries are located by a 1D density scan along the Sun-Earth
+line ($+x$, $y=z=0$), from $x = 30~R_E$ (undisturbed solar wind) inward
+to $x = 5~R_E$ (near Earth), sampled at 300 points
+(\texttt{find\_subsolar\_point}). Moving inward, the density profile
+crosses two boundaries in sequence: first a steep \emph{rise} (shocked,
+compressed solar wind -- the bow shock), then, further in, a steep
+\emph{drop} (from the dense sheath back down into the more tenuous
+magnetosphere -- the magnetopause). Both crossings are found the same
+way: the magnetopause is the grid step with the steepest drop in
+$\log(\rho)$ over the whole scan; the bow shock is the steepest
+\emph{rise} in $\log(\rho)$, restricted to the sunward side of the
+magnetopause crossing. On this run: magnetopause at $r_0 \approx
+7.97~R_E$ (density $1.13\times10^6 \rightarrow 1.85\times10^5$~m$^{-3}$),
+bow shock at $r_{bs} \approx 19.34~R_E$ (density $1.10\times10^6
+\rightarrow 2.86\times10^6$~m$^{-3}$, a $\sim$3-4$\times$ compression --
+the theoretical maximum for a perpendicular MHD shock).
+
+These two subsolar crossing distances anchor a subsolar Shue et
+al.\ (1998)-shaped surface, $r(\theta) = r_0 \left(\frac{2}{1 +
+\cos\theta}\right)^{\alpha}$, with $\theta$ measured from the Sun-Earth
+line -- one surface for the magnetopause (using $r_0$) and one for the
+bow shock (using $r_{bs}$), both sharing the canonical flaring exponent
+$\alpha = 0.58$ (this run has no solar wind monitor to fit $\alpha$
+from locally). This is a standard empirical parametrization of how both
+boundaries flare away from Earth off the Sun-Earth line, fitted here
+from a single subsolar density cut rather than a full boundary scan.
+
+\subsubsection{What each region is}
+With both flared surfaces in hand, every extracted VDF cell is
+classified by \texttt{classify\_magnetosphere\_regions} purely from its
+position (and local density) relative to them:
+\begin{itemize}
+  \item \textbf{Solar wind}: outside the bow-shock surface -- undisturbed
+  upstream plasma that hasn't yet interacted with Earth's magnetosphere.
+  A fast, narrow, close-to-Maxwellian beam.
+  \item \textbf{Magnetosheath}: between the bow-shock and magnetopause
+  surfaces -- solar wind that has crossed the bow shock and been shocked,
+  compressed, and heated. Denser and hotter than the solar wind, with a
+  broader, more turbulent VDF (decelerated and deflected around the
+  magnetopause).
+  \item \textbf{Inner magnetosphere}: inside the magnetopause surface and
+  close to Earth ($R < r_0$, a simple sphere, not the flared shape) --
+  dominated by Earth's dipole field, populated by trapped, quasi-thermal
+  plasma.
+  \item \textbf{Lobes}: inside the magnetopause surface but far from Earth
+  ($R \geq$ \texttt{lobe\_r\_min\_re}, $10~R_E$ here) -- tenuous,
+  open-field-line tail plasma, the coldest/most rarefied population in
+  this taxonomy.
+  \item \textbf{Undefined}: inside the magnetopause surface, in the
+  geometric gap $r_0 \leq R < $ \texttt{lobe\_r\_min\_re} -- $r_0$ is a
+  \emph{dayside-only} standoff distance, so applying it uniformly at all
+  angles would mislabel near-Earth nightside plasma as lobes;
+  \texttt{lobe\_r\_min\_re} is deliberately set larger to avoid that, and
+  the resulting band is left unassigned rather than guessed.
+\end{itemize}
+\texttt{current\_layer} (Section~\ref{sec:pca}'s ``disturbed'' population,
+together with magnetosheath) overrides whichever of the above a cell
+would otherwise get, wherever a cell coincides with a peak-$|J|$ core
+cell (the only active point substance this run,
+\texttt{core\_fraction~=~0.2}, dayside/tail search boxes independent,
+cells within $6~R_E$ of Earth excluded). Table \ref{tab:label-counts}
+gives the resulting counts.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lr}
+\toprule
+Label & Count \\
+\midrule
+lobes & 35 \\
+magnetosheath & 27 \\
+inner\_magnetosphere & 22 \\
+solar\_wind & 20 \\
+current\_layer & 7 \\
+undefined & 5 \\
+\midrule
+Total & 116 \\
+\bottomrule
+\end{tabular}
+\caption{Ground-truth label counts, smoke\_test run.}
+\label{tab:label-counts}
+\end{table}
+
+One representative VDF cell per label (chosen uniformly at random) is
+shown spatially in Figure~\ref{fig:vdf-verification}(a) and as three
+velocity-space cuts through its own peak in
+Figure~\ref{fig:vdf-verification}(b), in the same label order -- a
+sanity check that the label assigned to each representative matches the
+plasma population it physically sits in, and that its VDF shape is
+plausible for that population.
+
+\begin{figure}[htb]
+\centering
+\begin{subfigure}{0.55\textwidth}
+\centering
+\includegraphics[width=\textwidth]{../data/plots/verify_data/smoke_test/vdf_positions.png}
+\caption{Spatial position of each representative VDF.}
+\label{fig:vdf-positions}
+\end{subfigure}
+
+\vspace{0.3em}
+
+\begin{subfigure}{0.75\textwidth}
+\centering
+\includegraphics[width=\textwidth,height=0.38\textheight,keepaspectratio]{../data/plots/verify_data/smoke_test/vdf_examples.png}
+\caption{Velocity-space cuts ($v_x$-$v_y$, $v_x$-$v_z$, $v_y$-$v_z$,
+sliced through each VDF's own peak) of the same representatives, same
+order.}
+\label{fig:vdf-examples}
+\end{subfigure}
+\caption{Labelling verification, smoke\_test run: where each
+representative VDF sits (top) and what its velocity-space distribution
+looks like (bottom).}
+\label{fig:vdf-verification}
+\end{figure}
+
+\subsection{Rotation and Hermite-spectrum processing}
+Every extracted VDF was rotated into its own local
+$(\hat{B}, \hat{v}_\perp, \hat{B}\times\hat{v}_\perp)$ frame, then
+projected onto a truncated Hermite basis in log-space
+(\texttt{HERMITE\_ORDER~=~14}, so each spectrum is a
+$14\times14\times14$ array): the projected quantity is
+$\log_{10}(\mathrm{vdf}/\mathrm{sparsity\_threshold})$, which maps
+below-threshold background cells to exactly zero and preserves compact
+support (a floored $\log_{10}(\mathrm{vdf})$ instead integrates a large
+constant over the $\sim$99.85\%-empty grid and dominates every
+coefficient -- see \texttt{TESTING.md}). $u$/$v_{th}$ (drift
+velocity/thermal speed, setting the basis center/width) were computed
+from the raw linear VDF. Seven lower-order physical moments -- density,
+3-component bulk velocity, 3-component anisotropic thermal velocity --
+were computed in the same rotated frame and kept as separate features
+(Section~\ref{sec:pca-prep}), since the Hermite transform's own
+normalization deliberately strips out absolute density/velocity/width.
+
+% ---------------------------------------------------------------------
+\section{PCA analysis}
+\label{sec:pca}
+% Blind PCA + KMeans clustering, scored against the physical labels
+% from Section 1.
+
+\subsection{Feature representation}
+Results below use the \texttt{"hermite"} feature representation: each
+sample's $14\times14\times14$ log-space Hermite spectrum
+(Section~\ref{sec:data-processing}) flattened directly into a
+2744-dimensional feature vector -- no slicing/downsampling, unlike the
+\texttt{"raw"}/\texttt{"rotated"} pixel-slice representations, since the
+Hermite basis already sees the full 3D VDF in a compact form.
+
+\subsection{Feature preparation}
+\label{sec:pca-prep}
+Three preparation steps were applied, in this order, before
+\texttt{StandardScaler}+PCA:
+\begin{enumerate}
+  \item \textbf{Per-sample normalization} (\texttt{sample\_normalization
+    = "standard"}): each sample's flattened spectrum is mean-centered
+    and divided by its own standard deviation. Physically structured
+    populations (\texttt{current\_layer}, \texttt{magnetosheath}) have
+    raw spectrum magnitudes $\sim$6--9$\times$ larger than quieter
+    populations at the \emph{same shape} -- \texttt{StandardScaler}
+    alone (per-feature column scaling) leaves each sample's own overall
+    scale intact, so without this step that scale difference dominates
+    variance ahead of any shape difference.
+  \item \textbf{Moment features concatenated} (\texttt{include\_moment\_features
+    = True}): the 7 moment columns from
+    Section~\ref{sec:data-processing} are appended \emph{after} the
+    per-sample normalization above, and are \emph{not} themselves
+    per-sample-normalized -- they are exactly the absolute-scale
+    information the Hermite transform's $u$/$v_{th}$ normalization
+    discards, added back explicitly.
+  \item \textbf{Post-\texttt{StandardScaler} moment weighting}
+    (\texttt{moment\_feature\_weight = 10.0}): after
+    \texttt{StandardScaler} gives every column unit variance, the 7
+    moment columns are multiplied by $10\times$. Outnumbered
+    $\sim$392:1 by Hermite columns (2744 vs. 7), their aggregate
+    contribution to total variance would otherwise be diluted by column
+    count alone, independent of how informative they are.
+\end{enumerate}
+PCA was fit with \texttt{n\_components = 40}; KMeans was fit for
+$k \in \{2, \dots, 14\}$ and $k$ selected by silhouette score.
+
+\subsection{Clustering results}
+The silhouette score peaked at $k=2$ (0.314); scores for $k>2$ were
+lower and comparable to each other (0.17--0.28, peaking again mildly at
+$k=12$, 0.284) rather than showing a second clear elbow. Table
+\ref{tab:cluster-composition} gives the $k=2$ cluster composition
+against the ground-truth labels of Table \ref{tab:label-counts}.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrrrrrrr}
+\toprule
+Cluster & Size & lobes & magnetosheath & inner\_mag. & solar\_wind & current\_layer & undefined \\
+\midrule
+1 (disturbed) & 42 & 1 & 27 & 6 & 0 & 7 & 1 \\
+0 (calm)      & 74 & 34 & 0 & 16 & 20 & 0 & 4 \\
+\bottomrule
+\end{tabular}
+\caption{$k=2$ cluster composition, smoke\_test run, hermite features +
+moments. Cluster 1 contains 100\% of \texttt{magnetosheath} (27/27) and
+100\% of \texttt{current\_layer} (7/7) -- full recall of both
+``disturbed'' substances -- at 81\% purity (34/42) within the cluster.
+Cluster 0 is 100\% pure calm-plasma labels (\texttt{lobes}/
+\texttt{solar\_wind}/\texttt{inner\_magnetosphere}/\texttt{undefined}),
+zero contamination from either disturbed substance.}
+\label{tab:cluster-composition}
+\end{table}
+
+Figures: \texttt{pca\_scatter.png} (first two PCs, colored by both
+\texttt{cluster\_ml} and \texttt{cluster\_phys}),
+\texttt{silhouette\_by\_k.png}, \texttt{cluster\_hermite\_spectra.png}
+and \texttt{phys\_cluster\_hermite\_spectra.png} (flattened Hermite
+spectra of representative samples, per PCA cluster and per physical
+label respectively), all under
+\texttt{data/plots/pca\_snapshot/smoke\_test/}.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.85\textwidth]{../data/plots/pca_snapshot/smoke_test/pca_scatter.png}
+\caption{PCA scatter (first two principal components), smoke\_test run,
+hermite features + moments, $k=2$.}
+\label{fig:pca-scatter}
+\end{figure}
+
+\subsection{Discussion}
+With this feature set, blind clustering reliably separates
+``disturbed'' plasma (\texttt{current\_layer}, \texttt{magnetosheath} --
+structured, non-Maxwellian VDFs) from ``calm'' plasma
+(\texttt{lobes}/\texttt{solar\_wind}/\texttt{inner\_magnetosphere}/
+\texttt{undefined} -- near-Maxwellian) with \emph{perfect recall} of
+both disturbed substances at $k=2$: every \texttt{magnetosheath} and
+every \texttt{current\_layer} sample lands in cluster~1, and cluster~0
+has zero contamination from either. What it does \emph{not} yet do is
+resolve substructure \emph{within} either tier -- silhouette scores for
+$k>2$ don't show a clean second elbow, so KMeans on this feature set
+doesn't naturally separate \texttt{magnetosheath} from
+\texttt{current\_layer}, or \texttt{lobes}/\texttt{solar\_wind}/
+\texttt{inner\_magnetosphere} from each other. The 19\% contamination in
+cluster~1 (6 \texttt{inner\_magnetosphere} + 1 \texttt{lobes} + 1
+\texttt{undefined}) is also worth a closer look at those specific
+cells' spectra -- open question for the next iteration, not yet
+investigated here.
+
+% ---------------------------------------------------------------------
+\section*{Appendix: run configuration}
+\texttt{src/data\_proc/pipeline\_config.py}, as run for this report
+(\texttt{RUN\_ID = "smoke\_test"}):
+\begin{verbatim}
+SPATIAL_BOXRE = [-30, 30, -5, 5]
+POINTS_CONFIG["active_point_substances"] = ["current_layer"]
+POINTS_CONFIG["current_layer_selection"]["core_fraction"] = 0.2
+POINTS_CONFIG["current_layer_selection"]["min_r_re"] = 6.0
+MAGNETOPAUSE_CONFIG["lobe_r_min_re"] = 10.0
+BUILD_ROTATED_DATASET = False
+BUILD_HERMITE_DATASET = True
+HERMITE_ORDER = 14
+
+PCA_CONFIG = {
+    "n_components": 40,
+    "k_range": list(range(2, 15)),
+    "feature_representation": "hermite",
+    "sample_normalization": "standard",
+    "include_moment_features": True,
+    "moment_feature_weight": 10.0,
+}
+\end{verbatim}
+
+\end{document}

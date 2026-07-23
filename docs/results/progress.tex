@@ -7,7 +7,7 @@
 \usepackage{hyperref}
 \usepackage{booktabs}
 \usepackage{caption}
-\usepackage{subcaption}
+\usepackage{wrapfig}
 
 \title{VDF Classification: Investigation Progress}
 \author{}
@@ -59,9 +59,9 @@ labels assigned in Section~\ref{sec:labelling}.
 
 \begin{figure}[h]
 \centering
-\includegraphics[width=0.85\textwidth]{../data/plots/extract_data/smoke_test/all_vdfs.png}
+\includegraphics[width=0.85\textwidth]{./images/all_vdfs.png}
 \caption{Extracted VDF cells, colored by ground-truth label, smoke\_test
-run. Blue dashed circle: fitted Shue standoff $r_0$. Cyan dotted circle:
+run. Blue dashed circle: fitted Shue standoff $r_{mp}$. Cyan dotted circle:
 \texttt{lobe\_r\_min\_re}. Pink dot cloud: the current-layer core's
 dense-grid extent; pink diamonds: the VDF cells actually labelled
 \texttt{current\_layer}.}
@@ -83,23 +83,40 @@ magnetosphere -- the magnetopause). Both crossings are found the same
 way: the magnetopause is the grid step with the steepest drop in
 $\log(\rho)$ over the whole scan; the bow shock is the steepest
 \emph{rise} in $\log(\rho)$, restricted to the sunward side of the
-magnetopause crossing. On this run: magnetopause at $r_0 \approx
+magnetopause crossing. On this run: magnetopause at $r_{mp} \approx
 7.97~R_E$ (density $1.13\times10^6 \rightarrow 1.85\times10^5$~m$^{-3}$),
 bow shock at $r_{bs} \approx 19.34~R_E$ (density $1.10\times10^6
 \rightarrow 2.86\times10^6$~m$^{-3}$, a $\sim$3-4$\times$ compression --
 the theoretical maximum for a perpendicular MHD shock).
 
 These two subsolar crossing distances anchor a subsolar Shue et
-al.\ (1998)-shaped surface, $r(\theta) = r_0 \left(\frac{2}{1 +
+al.\ (1998)-shaped surface, $r(\theta) = r_{mp} \left(\frac{2}{1 +
 \cos\theta}\right)^{\alpha}$, with $\theta$ measured from the Sun-Earth
-line -- one surface for the magnetopause (using $r_0$) and one for the
+line -- one surface for the magnetopause (using $r_{mp}$) and one for the
 bow shock (using $r_{bs}$), both sharing the canonical flaring exponent
 $\alpha = 0.58$ (this run has no solar wind monitor to fit $\alpha$
 from locally). This is a standard empirical parametrization of how both
 boundaries flare away from Earth off the Sun-Earth line, fitted here
 from a single subsolar density cut rather than a full boundary scan.
 
+% wrapfig cannot split a figure across a page break, and this figure is
+% ~2x taller than it is wide -- the section must start high on a fresh
+% page or the reserved text indent and the figure end up on different
+% pages (observed, not hypothetical).
+\newpage
 \subsubsection{What each region is}
+
+\begin{wrapfigure}{r}{0.40\textwidth}
+\vspace{-12pt}
+\centering
+\includegraphics[width=\linewidth,trim={0.15cm 0.15cm 0.15cm 0.15cm},clip]{./images/vdf_examples.png}
+\caption{Labelling verification, smoke\_test run: where each
+representative VDF sits (top) and its velocity-space cuts
+($v_x$-$v_y$, $v_x$-$v_z$, $v_y$-$v_z$) below.}
+\label{fig:vdf-verification}
+\vspace{-10pt}
+\end{wrapfigure}
+
 With both flared surfaces in hand, every extracted VDF cell is
 classified by \texttt{classify\_magnetosphere\_regions} purely from its
 position (and local density) relative to them:
@@ -113,27 +130,27 @@ position (and local density) relative to them:
   broader, more turbulent VDF (decelerated and deflected around the
   magnetopause).
   \item \textbf{Inner magnetosphere}: inside the magnetopause surface and
-  close to Earth ($R < r_0$, a simple sphere, not the flared shape) --
+  close to Earth ($R < r_{mp}$, a simple sphere, not the flared shape) --
   dominated by Earth's dipole field, populated by trapped, quasi-thermal
   plasma.
   \item \textbf{Lobes}: inside the magnetopause surface but far from Earth
   ($R \geq$ \texttt{lobe\_r\_min\_re}, $10~R_E$ here) -- tenuous,
   open-field-line tail plasma, the coldest/most rarefied population in
   this taxonomy.
+  \item \textbf{Current layer} (Section~\ref{sec:pca}'s ``disturbed''
+  population, together with magnetosheath): overrides whichever of the
+  other regions a cell would otherwise get, wherever a cell coincides
+  with a peak-$|J|$ core cell (the only active point substance this run,
+  \texttt{core\_fraction~=~0.2}, dayside/tail search boxes independent,
+  cells within $6~R_E$ of Earth excluded).
   \item \textbf{Undefined}: inside the magnetopause surface, in the
-  geometric gap $r_0 \leq R < $ \texttt{lobe\_r\_min\_re} -- $r_0$ is a
+  geometric gap $r_{mp} \leq R < $ \texttt{lobe\_r\_min\_re} -- $r_{mp}$ is a
   \emph{dayside-only} standoff distance, so applying it uniformly at all
   angles would mislabel near-Earth nightside plasma as lobes;
   \texttt{lobe\_r\_min\_re} is deliberately set larger to avoid that, and
   the resulting band is left unassigned rather than guessed.
 \end{itemize}
-\texttt{current\_layer} (Section~\ref{sec:pca}'s ``disturbed'' population,
-together with magnetosheath) overrides whichever of the above a cell
-would otherwise get, wherever a cell coincides with a peak-$|J|$ core
-cell (the only active point substance this run,
-\texttt{core\_fraction~=~0.2}, dayside/tail search boxes independent,
-cells within $6~R_E$ of Earth excluded). Table \ref{tab:label-counts}
-gives the resulting counts.
+Table \ref{tab:label-counts} gives the resulting counts.
 
 \begin{table}[h]
 \centering
@@ -156,55 +173,129 @@ Total & 116 \\
 \end{table}
 
 One representative VDF cell per label (chosen uniformly at random) is
-shown spatially in Figure~\ref{fig:vdf-verification}(a) and as three
-velocity-space cuts through its own peak in
-Figure~\ref{fig:vdf-verification}(b), in the same label order -- a
-sanity check that the label assigned to each representative matches the
-plasma population it physically sits in, and that its VDF shape is
-plausible for that population.
+shown in Figure~\ref{fig:vdf-verification}: a header row with each
+representative's spatial position, followed by its three velocity-space
+cuts through its own peak, in the same label order -- a sanity check
+that the label assigned to each representative matches the plasma
+population it physically sits in, and that its VDF shape is plausible
+for that population. The header and the cuts below it are generated
+together as one figure (\texttt{plot\_cluster\_vdf\_examples}, whose
+header row reuses \texttt{plot\_cluster\_vdf\_positions}'s own drawing
+code) specifically so the two never need to be cross-referenced by hand.
+
+\subsection{Rotation and Hermite-spectrum processing}
+\label{sec:rotation-hermite}
+
+\subsubsection{Rotation into the local magnetic-field frame}
+The same physical distribution can look very different in the simulation
+frame depending on where in the domain it sits, simply because the local
+magnetic field points in a different direction -- an orientation
+confound that a shape-sensitive representation should not have to learn.
+Every extracted VDF is therefore resampled into its own field-aligned
+orthonormal frame
+\begin{equation}
+\hat{e}_\parallel = \hat{B}, \qquad
+\hat{e}_{\perp} = \frac{\mathbf{u} - (\mathbf{u}\cdot\hat{B})\,\hat{B}}
+                        {\left|\mathbf{u} - (\mathbf{u}\cdot\hat{B})\,\hat{B}\right|}, \qquad
+\hat{e}_{\perp 2} = \hat{e}_\parallel \times \hat{e}_{\perp},
+\label{eq:rotation-frame}
+\end{equation}
+where $\mathbf{B}$ and $\mathbf{u}$ are the cell's local magnetic field
+and bulk velocity. The bulk velocity is Gram--Schmidt orthogonalized
+against $\hat{B}$ (rather than used raw) so the resulting matrix is an
+exact orthonormal rotation even in the presence of strong field-aligned
+flow; the degenerate case $\mathbf{u} \parallel \mathbf{B}$, where no
+perpendicular direction exists, falls back to the unrotated VDF and is
+counted rather than silently mis-rotated. The distribution is resampled
+onto the rotated grid by trilinear interpolation. Interpolation slightly
+smooths the distribution, so the recovered density is monitored as a
+rotation-correctness diagnostic: it changes by well under $1\%$ (e.g.
+$-0.36\%$ for the representative in Figure~\ref{fig:rotation-hermite}),
+whereas a large shift would signal a broken rotation.
+
+\subsubsection{Log-space Hermite transform}
+In the rotated frame, each VDF is projected onto a separable basis of
+Hermite functions -- the natural spectral basis for near-Maxwellian
+plasmas, whose zeroth mode \emph{is} a drifting Maxwellian and whose
+higher modes encode progressively finer velocity-space structure. Along
+each axis the basis functions are
+\begin{equation}
+\psi_{m}(\xi) = \left(2^{m} m!\,\sqrt{\pi}\,v_{th}\right)^{-1/2}
+H_{m}(\xi)\, e^{-\xi^{2}/2}, \qquad
+\xi = \frac{v - u}{v_{th}},
+\label{eq:hermite-basis}
+\end{equation}
+with $H_{m}$ the physicists' Hermite polynomials; the drift velocity
+$u$ and (isotropic) thermal speed $v_{th}$, which set the basis center
+and width, are genuine moments computed from the raw linear VDF. The
+spectrum is the tensor-product projection
+\begin{equation}
+H(m_{\parallel}, m_{\perp}, m_{\perp 2}) =
+\int g(\mathbf{v})\,
+\psi_{m_{\parallel}}(\xi_{\parallel})\,
+\psi_{m_{\perp}}(\xi_{\perp})\,
+\psi_{m_{\perp 2}}(\xi_{\perp 2})\, d^{3}v,
+\label{eq:hermite-projection}
+\end{equation}
+truncated at \texttt{HERMITE\_ORDER}~$=14$ per axis, so each VDF
+becomes a $14\times14\times14$ coefficient array. Crucially, the
+projected quantity is not $f$ itself but its \emph{logarithm relative
+to the sparsity floor},
+\begin{equation}
+g(\mathbf{v}) =
+\begin{cases}
+\log_{10}\!\left(f(\mathbf{v}) / f_{\mathrm{sp}}\right), & f(\mathbf{v}) > f_{\mathrm{sp}},\\
+0, & \text{otherwise},
+\end{cases}
+\label{eq:log-patch}
+\end{equation}
+where $f_{\mathrm{sp}}$ is the simulation's own sparse-storage
+threshold. The logarithm keeps the wings' contribution comparable to
+the core's (a linear projection is dominated by the peak, hiding
+exactly the non-Maxwellian tail structure the classification targets),
+and subtracting the floor -- rather than substituting
+$\log_{10} f_{\mathrm{sp}}$ as a constant background -- keeps
+below-threshold cells at exactly zero, preserving the VDF's compact
+support: on this fixture $\sim$99.85\% of the velocity grid is empty,
+and integrating a constant background over it would otherwise dominate
+every coefficient with a term unrelated to the VDF's actual shape.
+
+Figure~\ref{fig:rotation-hermite} shows the full processing chain for
+the magnetosheath representative: the raw VDF with the in-plane
+direction of $\mathbf{B}$ marked, the same distribution in the rotated
+$(v_{\parallel}, v_{\perp})$ frame, and its Hermite spectrum reduced to
+two dimensions by summing in quadrature over the second perpendicular
+index, $H(m_{\parallel}, m_{\perp}) = [\sum_{m_{\perp 2}}
+H^{2}(m_{\parallel}, m_{\perp}, m_{\perp 2})]^{1/2}$ -- the
+Hermite-space analogue of a gyrotropic reduction. The checkerboard
+pattern (alternating even/odd mode amplitudes decaying with order) is
+characteristic of the structured, shocked magnetosheath population;
+quiet near-Maxwellian populations concentrate almost entirely in the
+lowest few modes.
 
 \begin{figure}[htb]
 \centering
-\begin{subfigure}{0.55\textwidth}
-\centering
-\includegraphics[width=\textwidth]{../data/plots/verify_data/smoke_test/vdf_positions.png}
-\caption{Spatial position of each representative VDF.}
-\label{fig:vdf-positions}
-\end{subfigure}
-
-\vspace{0.3em}
-
-\begin{subfigure}{0.75\textwidth}
-\centering
-\includegraphics[width=\textwidth,height=0.38\textheight,keepaspectratio]{../data/plots/verify_data/smoke_test/vdf_examples.png}
-\caption{Velocity-space cuts ($v_x$-$v_y$, $v_x$-$v_z$, $v_y$-$v_z$,
-sliced through each VDF's own peak) of the same representatives, same
-order.}
-\label{fig:vdf-examples}
-\end{subfigure}
-\caption{Labelling verification, smoke\_test run: where each
-representative VDF sits (top) and what its velocity-space distribution
-looks like (bottom).}
-\label{fig:vdf-verification}
+\includegraphics[width=\textwidth]{./images/vdf_rotation_hermite_magnetosheath.png}
+\caption{Rotation and Hermite processing chain for the magnetosheath
+representative (cid=3452401), smoke\_test run. Left: raw VDF
+$v_x$--$v_z$ slice, with the in-plane direction of $\mathbf{B}$ (red
+arrow) and the angle between $\mathbf{B}$ and the bulk flow annotated.
+Center: the same VDF resampled into its local field-aligned frame
+(Eq.~\ref{eq:rotation-frame}); the density change from interpolation
+($-0.36\%$) is the rotation-correctness diagnostic. Right: its
+log-space Hermite spectrum
+(Eqs.~\ref{eq:hermite-projection}--\ref{eq:log-patch}), reduced to
+$(m_{\parallel}, m_{\perp})$ by quadrature over the second
+perpendicular index.}
+\label{fig:rotation-hermite}
 \end{figure}
 
-\subsection{Rotation and Hermite-spectrum processing}
-Every extracted VDF was rotated into its own local
-$(\hat{B}, \hat{v}_\perp, \hat{B}\times\hat{v}_\perp)$ frame, then
-projected onto a truncated Hermite basis in log-space
-(\texttt{HERMITE\_ORDER~=~14}, so each spectrum is a
-$14\times14\times14$ array): the projected quantity is
-$\log_{10}(\mathrm{vdf}/\mathrm{sparsity\_threshold})$, which maps
-below-threshold background cells to exactly zero and preserves compact
-support (a floored $\log_{10}(\mathrm{vdf})$ instead integrates a large
-constant over the $\sim$99.85\%-empty grid and dominates every
-coefficient -- see \texttt{TESTING.md}). $u$/$v_{th}$ (drift
-velocity/thermal speed, setting the basis center/width) were computed
-from the raw linear VDF. Seven lower-order physical moments -- density,
+Seven lower-order physical moments -- density,
 3-component bulk velocity, 3-component anisotropic thermal velocity --
 were computed in the same rotated frame and kept as separate features
 (Section~\ref{sec:pca-prep}), since the Hermite transform's own
-normalization deliberately strips out absolute density/velocity/width.
+$u$/$v_{th}$ normalization deliberately strips out absolute
+density/velocity/width.
 
 % ---------------------------------------------------------------------
 \section{PCA analysis}
@@ -289,7 +380,7 @@ label respectively), all under
 
 \begin{figure}[h]
 \centering
-\includegraphics[width=0.85\textwidth]{../data/plots/pca_snapshot/smoke_test/pca_scatter.png}
+\includegraphics[width=0.85\textwidth]{./images/pca_scatter.png}
 \caption{PCA scatter (first two principal components), smoke\_test run,
 hermite features + moments, $k=2$.}
 \label{fig:pca-scatter}

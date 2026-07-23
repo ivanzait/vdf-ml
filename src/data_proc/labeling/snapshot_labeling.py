@@ -3,7 +3,7 @@ Snapshot-wide VDF loading and ground-truth labeling: point substances
 (x_point/o_point/x_point_o_point from the physical topology detector,
 src.data_proc.physics.point_topology; current_layer from the peak-current-
 density detector, src.data_proc.physics.current_layer -- toggled per run via
-points_config["active_point_substances"], see schema.md), and
+points_config["active_point_substances"], see SCHEMA.md), and
 magnetosheath/inner-magnetosphere from a subsolar-anchored Shue magnetopause
 model (src.data_proc.physics.magnetopause).
 
@@ -223,17 +223,17 @@ def find_magnetosphere_region_cellids(reader, points_config, regions_re=None):
     src.data_proc.physics.magnetopause):
     Fixed priority order (see classify_magnetosphere_regions for the exact
     rules): no_density_data, solar_wind, magnetosheath, inner_magnetosphere,
-    lobes, undefined (the catch-all, including the r0-to-lobe_r_min_re gap
-    when lobe_r_min_re is set larger than r0 to keep near-Earth nightside
+    lobes, undefined (the catch-all, including the r_mp-to-lobe_r_min_re gap
+    when lobe_r_min_re is set larger than r_mp to keep near-Earth nightside
     plasma out of "lobes"). No margin/buffer zone around the magnetopause
     any more -- current_layer's physically-detected peak-|J| core (a
-    separate point substance, see schema.md) already identifies the real
+    separate point substance, see SCHEMA.md) already identifies the real
     magnetopause current layer with much better precision than a crude
     geometric buffer here could.
 
     Config block: points_config["magnetopause"] (x_scan_min_re,
     x_scan_max_re, n_scan_points, density_variable, alpha, lobe_r_min_re).
-    The subsolar scan itself (r0/r_bs) always runs along the full +x axis
+    The subsolar scan itself (r_mp/r_bs) always runs along the full +x axis
     regardless of regions_re -- only which cells get classified/returned is
     restricted.
 
@@ -247,7 +247,7 @@ def find_magnetosphere_region_cellids(reader, points_config, regions_re=None):
 
     Returns cellids_by_region (dict of {"magnetosheath"/"solar_wind"/
     "inner_magnetosphere"/"lobes"/"no_density_data"/"undefined":
-    set(cellid)}), shue_fit (r0_re/r_bs_re/alpha/subsolar), vdf_cellids,
+    set(cellid)}), shue_fit (r_mp_re/r_bs_re/alpha/subsolar), vdf_cellids,
     vdf_coords_re, region_labels (aligned with vdf_cellids).
     """
 
@@ -271,7 +271,7 @@ def find_magnetosphere_region_cellids(reader, points_config, regions_re=None):
     region_labels = classify_magnetosphere_regions(
         vdf_coords_re=vdf_coords_re,
         densities=densities,
-        r0_re=shue_fit["r0_re"],
+        r_mp_re=shue_fit["r_mp_re"],
         r_bs_re=shue_fit["r_bs_re"],
         alpha=shue_fit["alpha"],
         lobe_r_min_re=magnetopause_config.get("lobe_r_min_re"),
@@ -305,7 +305,7 @@ def combine_ground_truth_labels(vdf_cellids, region_labels, point_substance_cell
         ran (e.g. find_ground_truth_point_cellids for
         x_point/o_point/x_point_o_point, find_current_layer_cellids for
         current_layer) -- this function has no knowledge of which
-        substances exist or which are active; see schema.md.
+        substances exist or which are active; see SCHEMA.md.
     """
 
     labels = np.asarray(region_labels, dtype=object).copy()
@@ -318,7 +318,7 @@ def compute_snapshot_ground_truth(reader, points_config, regions_re=None, flux_f
     """
     Full ground-truth pipeline for one snapshot: whichever point substances
     are active (points_config["active_point_substances"] -- "x_o_points"
-    and/or "current_layer", see schema.md), Shue-model region
+    and/or "current_layer", see SCHEMA.md), Shue-model region
     classification, and the combined per-cell label array. Composes
     find_ground_truth_point_cellids and/or find_current_layer_cellids +
     find_magnetosphere_region_cellids + combine_ground_truth_labels, so

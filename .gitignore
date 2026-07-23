@@ -11,3 +11,8 @@ data/
 slurm/
 .claude/
 .venv/
+
+*.aux
+*.log
+*.out
+*.toc

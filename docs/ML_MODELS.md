@@ -82,7 +82,8 @@ Used by `scripts/ml_models/run_snapshot_pca.py` (fit + score) and
 results to pick the smallest clusters to plot -- see `docs/DATA_PROC.md`'s
 cluster-plotting pipeline section).
 
-- `fit_pca_clusters(features, k_range, n_components=20, random_state=1234)` — PCA-reduce then KMeans-cluster, auto-selecting `k` by silhouette score.
+- `fit_pca_clusters(features, k_range, n_components=20, random_state=1234, feature_weights=None)` — PCA-reduce then KMeans-cluster, auto-selecting `k` by silhouette score; `feature_weights` multiplies the standardized columns post-`StandardScaler` (pre-scaling weights would be silently undone).
+- `fit_som_map(features, som_shape=(6, 6), ..., n_node_clusters=0)` — train a Self-Organizing Map (minisom) on one blind cluster's PCA scores and locate every sample's best-matching unit; optionally KMeans-partition the trained codebook. Returns plain arrays (bmu_coords/u_matrix/node_cluster_grid) so `plot_tools.plot_som_label_maps` can draw them without importing this package. Backs `scripts/ml_models/run_snapshot_som.py`.
 - `summarize_clusters_against_ground_truth(cellids, labels, ground_truth_cellids_by_category)` — per-cluster size + ground-truth-category overlap, scored against `src.data_proc.labeling.snapshot_labeling`'s output (read back from `extract_data.py`'s saved `metadata.csv`, not recomputed).
 
 (All plotting for this module -- silhouette/PCA-scatter diagnostics and the 3-step cluster-visualization pipeline -- lives in `src/data_proc/plot_tools.py`, not here; see `docs/DATA_PROC.md`. It moved to `data_proc` because it only ever consumed plain cellids/labels, never any PCA/KMeans internals.)
@@ -96,4 +97,4 @@ Key entry points:
 - `fit_incremental_pca(...)` / `fit_transform_torch_pca(...)` / `fit_multi_device_lowrank_pca(...)` — CPU vs. single/multi-GPU PCA fit paths.
 - `compute_neighbor_purity(...)` / `compute_point_neighbor_metrics(...)` — the neighbor-purity ground-truth scoring this tool is built around.
 - `save_pca_plots(...)` / `save_pca_outputs(...)` — save the diagnostic plot set + metrics.
-- Everything else (`resolve_*_config`, `fit_transform_*`, `create_*_metric_lines`, `format_*`, `plot_pca_*`) is internal to the above; see `pca_guide.md` at the repo root for the tool's usage guide.
+- Everything else (`resolve_*_config`, `fit_transform_*`, `create_*_metric_lines`, `format_*`, `plot_pca_*`) is internal to the above; see [`PCA_GUIDE.md`](PCA_GUIDE.md) for the tool's usage guide.

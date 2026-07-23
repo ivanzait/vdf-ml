@@ -10,7 +10,7 @@
 # model magnetosphere regions, plus whichever "point-like" substance(s) are
 # toggled on in POINTS_CONFIG["active_point_substances"] -- current_layer
 # [peak-|J| core, exact cellid match] and/or x_o_points [Hessian
-# critical-point detector], see schema.md), saves X.npy + metadata.csv, prints VDF value
+# critical-point detector], see SCHEMA.md), saves X.npy + metadata.csv, prints VDF value
 # statistics (absorbed from the old inspect_dataset.py -- reuses the X
 # already in memory, no reload), then plots what was extracted (every cell
 # colored by its label, magnetopause/bow-shock drawn). No Hermite transform
@@ -125,7 +125,7 @@ def main():
     region_labels = classify_magnetosphere_regions(
         vdf_coords_re=coords_re,
         densities=densities,
-        r0_re=shue_fit["r0_re"],
+        r_mp_re=shue_fit["r_mp_re"],
         r_bs_re=shue_fit["r_bs_re"],
         alpha=shue_fit["alpha"],
         lobe_r_min_re=config.MAGNETOPAUSE_CONFIG.get("lobe_r_min_re"),

@@ -9,7 +9,7 @@ regions from a subsolar-anchored Shue (1998) model, plus whichever
 "point-like" substance(s) are toggled on in `pipeline_config.py` --
 `current_layer` (peak-current-density core, exact cellid match, the
 default) and/or `x_o_points` (a Hessian critical-point detector) -- via
-`scripts/data_proc/extract_data.py`. See [`schema.md`](schema.md) for the
+`scripts/data_proc/extract_data.py`. See [`docs/SCHEMA.md`](docs/SCHEMA.md) for the
 substance concept and how to add a new one. An **older**, Santtu-authored
 label scheme (static `lobe`/`exhaust`/`o_point`/`x_point`/`dayside` classes)
 has its scripts removed; the code it depended on is consolidated (but no
@@ -35,11 +35,11 @@ don't conflate them:
   structure a VDF cell physically belongs to. Made of base region
   substances (`magnetosheath`, `solar_wind`, `inner_magnetosphere`,
   `lobes`, `no_density_data`, `undefined` -- always computed, in a fixed
-  priority order, see [`schema.md`](schema.md)) plus whichever point
+  priority order, see [`docs/SCHEMA.md`](docs/SCHEMA.md)) plus whichever point
   substance(s) are toggled on
   (`current_layer`; or `x_point`/`o_point`/`x_point_o_point`; or both --
   see `pipeline_config.py`'s `POINTS_CONFIG["active_point_substances"]` and
-  [`schema.md`](schema.md)). This is ground truth, not discovered — it's
+  [`docs/SCHEMA.md`](docs/SCHEMA.md)). This is ground truth, not discovered — it's
   what `extract_data.py` computes and saves as `metadata.csv`'s `label`
   column, and what `verify_data.py` visualizes one representative VDF per
   label for.
@@ -71,7 +71,7 @@ src/data_proc/            Technical tools: VLSV reading, region/box masks,
                             assumptions.
   labeling/                Current label-assignment subsystem: turns detected
                             point substances + regions into per-VDF-cell
-                            labels (see schema.md).
+                            labels (see `docs/SCHEMA.md`).
 src/ml_models/             Training-data loading, model classes, training
                            loops, coordinate/region prediction, model
                            checkpoint I/O, the standalone PCA diagnostic tool.
@@ -109,9 +109,12 @@ export PTNOLATEX=1                                  # analysator plots need this
 export PYTHONPATH=/path/to/your/analysator/checkout  # if analysator isn't pip-installed
 ```
 
+Python dependencies live in `.venv` (numpy/scipy/pandas/matplotlib/
+scikit-learn/torch, plus `minisom` for `run_snapshot_som.py`).
+
 ## Conventions
 
-See [`PIPELINE.md`](PIPELINE.md) for the rules governing any change to this
+See [`docs/PIPELINE.md`](docs/PIPELINE.md) for the rules governing any change to this
 codebase — two ground rules (this is physicists' code; this is multi-user
 code) plus the concrete conventions (no redundant functions, one shared
 config per pipeline, layering, docstring style, verify-by-running). Read it
@@ -131,7 +134,7 @@ verification plot always agree on what "this run" means. Edit
    `python scripts/data_proc/extract_data.py`. Runs Shue-model region
    classification plus whichever point substance(s)
    `POINTS_CONFIG["active_point_substances"]` selects (`current_layer`
-   and/or `x_o_points`, see [`schema.md`](schema.md)), saves `X.npy` +
+   and/or `x_o_points`, see [`docs/SCHEMA.md`](docs/SCHEMA.md)), saves `X.npy` +
    `metadata.csv` (per-cell `B`/bulk `V` and the velocity-mesh extent are
    saved too, so a representation choice like rotation can be made
    downstream without reopening the `.vlsv` file; no `y.npy` -- see the
@@ -149,19 +152,26 @@ verification plot always agree on what "this run" means. Edit
 
 2. **Verify per-label VDFs**: `python scripts/data_proc/verify_data.py`.
    Picks one representative VDF per label (same `pipeline_config.py`, same
-   ground truth) and produces two plots: where each one sits spatially, and
-   its three velocity-space cuts (vx-vy, vx-vz, vy-vz) sliced through its
-   own peak.
+   ground truth) and produces one combined plot: a header row showing
+   where each one sits spatially, followed by its three velocity-space
+   cuts (vx-vy, vx-vz, vy-vz) sliced through its own peak.
 
-3. **Other verification angles** (independent parameters, not wired into
-   `pipeline_config.py` -- see `PIPELINE.md`'s "one shared config per
+3. **Rotation + Hermite transform for one substance**:
+   `python scripts/data_proc/plot_vdf_rotation_hermite.py`. Same shared
+   ground truth as step 2, but for a single chosen label (`SUBSTANCE_LABEL`,
+   default `"magnetosheath"`): raw VDF, that VDF rotated into its local
+   `(B, v_perp, B x v_perp)` frame, and its log-space Hermite spectra,
+   side by side.
+
+4. **Other verification angles** (independent parameters, not wired into
+   `pipeline_config.py` -- see `docs/PIPELINE.md`'s "one shared config per
    pipeline" rule):
    ```
    python scripts/data_proc/plot_nulls.py        # sanity-check the X/O detector + search boxes
    python scripts/data_proc/plot_vdf_hermite.py  # ad-hoc VDF/Hermite/rotation exploration
    ```
 
-4. **(Optional) compute `cluster_ml`** on the extracted dataset and score it
+5. **(Optional) compute `cluster_ml`** on the extracted dataset and score it
    against `cluster_phys` (see "Terminology" above):
    ```
    python scripts/ml_models/run_snapshot_pca.py    # PCA + KMeans (auto-k), scored against metadata.csv's cluster_phys (label column)
@@ -184,6 +194,20 @@ verification plot always agree on what "this run" means. Edit
    the VLSV file itself; `plot_snapshot_pca.py` reads its saved
    `data/pca/<RUN_ID>/pca_results.npz` and only then opens the VLSV file,
    for plot backgrounds and VDF re-extraction.
+
+6. **(Optional) SOM within each blind cluster**:
+   ```
+   python scripts/ml_models/run_snapshot_som.py    # one Self-Organizing Map per PCA/KMeans cluster, painted with cluster_phys
+   ```
+   The PCA k=2 split separates calm from disturbed plasma well but not
+   the substances *within* each tier -- each SOM maps that finer
+   structure, fit on the saved `pca_scores` of one cluster's samples
+   after a per-tier PCA refit (`SOM_CONFIG` in `pipeline_config.py`;
+   needs `run_snapshot_pca.py` to have run for this `RUN_ID`, opens no
+   VLSV file). Saves `som_label_maps.png` (U-matrix + codebook-KMeans
+   partition per cluster, samples painted by expert label) and prints
+   per-node-cluster label compositions plus an adjusted Rand index per
+   tier -- the tuning metric for `SOM_CONFIG` (see `docs/PCA_GUIDE.md`).
 
 ### Training + prediction (currently only against old-format datasets)
 
@@ -224,11 +248,11 @@ the current pipeline.)
 
 ## Other tools
 
-- `TESTING.md` — how to validate a change to `src/data_proc/` (no automated
+- `docs/TESTING.md` — how to validate a change to `src/data_proc/` (no automated
   test suite; a stage-by-stage manual verification guide against a local
   fixture snapshot, plus a table of failure modes caught during development
   so they don't silently regress).
-- `pca_guide.md` — the standalone PCA diagnostic tool
+- `docs/PCA_GUIDE.md` — the standalone PCA diagnostic tool
   (`scripts/data_proc/plot_dataset_pca.py`): class-separability plots and
   neighbor-purity metrics on a dataset's VDF features. Not part of the CNN
   training path.

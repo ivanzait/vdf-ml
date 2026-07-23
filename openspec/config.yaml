@@ -1,0 +1,83 @@
+# SDD Configuration for vdf-ml
+# Created: 2026-07-22
+
+project: vdf-ml
+description: ML/physics repository for VDF (velocity distribution function) analysis from Vlasiator simulations
+repository: https://github.com/faiser-santtu/vdf-ml
+
+# SDD Settings
+persistence: openspec
+strict_tdd: false  # Manual verification-based testing, no automated test suite
+review_budget: 800
+delivery_strategy: ask-always
+execution_mode: auto
+
+# Project Context
+stack:
+  language: python
+  version: "3.13"
+  ml_frameworks:
+    - pytorch
+    - sklearn
+    - numpy
+  physics_libraries:
+    - analysator (Vlasiator I/O)
+    - custom physics modules
+  conventions:
+    - PEP8 style (implied by codebase)
+    - YAML configuration per script
+    - Layer separation: data_proc/physics independent from ml_models
+    - Documentation per function in docs/ directory
+    - Manual verification testing (no automated test suite)
+    - PIPELINE.md conventions for multi-user physics code
+
+# Testing Capabilities
+testing:
+  runner: manual_verification
+  framework: none
+  unit: false
+  integration: false
+  e2e: false
+  coverage: false
+  coverage_command: none
+  quality_tools:
+    linter: none
+    type_checker: none
+    formatter: none
+  verification_scripts:
+    - scripts/data_proc/extract_data.py (full pipeline)
+    - scripts/data_proc/verify_data.py (label verification)
+    - scripts/data_proc/plot_nulls.py (X/O detector verification)
+    - scripts/data_proc/plot_vdf_hermite.py (rotation/hermite verification)
+    - scripts/ml_models/run_snapshot_pca.py (PCA/clustering verification)
+    - scripts/ml_models/plot_snapshot_pca.py (PCA visualization)
+
+# Phase Rules
+phases:
+  proposal:
+    max_lines: 400
+    artifact: openspec/changes/{change_id}/proposal.md
+  spec:
+    max_lines: 500
+    artifact: openspec/changes/{change_id}/spec.md
+  design:
+    max_lines: 600
+    artifact: openspec/changes/{change_id}/design.md
+  tasks:
+    max_lines: 400
+    artifact: openspec/changes/{change_id}/tasks.md
+  apply:
+    max_lines: unlimited
+    artifact: changeset in repository
+  verify:
+    max_lines: 300
+    artifact: openspec/changes/{change_id}/verification.md
+  archive:
+    max_lines: 200
+    artifact: openspec/changes/{change_id}/archive.md
+
+# Skill Registry
+skills:
+  - load_ml_knowledge: ML/PCA pipelines, feature representations, CNN training
+  - load_physicist_knowledge: plasma physics, magnetosphere detection, labeling
+  - orchestrate: route tasks to correct domain knowledge

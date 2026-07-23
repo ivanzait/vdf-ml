@@ -36,7 +36,7 @@ exists before re-deriving it.
 ## `current_layer.py` — current-density peak detection
 
 Live consumer: `labeling.snapshot_labeling.find_current_layer_cellids`,
-toggled on via `points_config["active_point_substances"]` — see `schema.md`.
+toggled on via `points_config["active_point_substances"]` — see `SCHEMA.md`.
 
 - `read_b_field_grid(reader)` — dense `(z_cells, x_cells)` grid of `B`, read natively from the `.vlsv` file (no external flux file needed); mirrors `point_topology.read_smoothed_flux_grid`'s index convention.
 - `compute_b_jacobian_grid(Bx_zx, By_zx, Bz_zx, dx)` — the six in-plane partial derivatives of `B` via `np.gradient`.
@@ -46,9 +46,9 @@ toggled on via `points_config["active_point_substances"]` — see `schema.md`.
 ## `magnetopause.py` — subsolar-anchored Shue (1998) magnetopause + bow shock
 
 - `find_subsolar_point(reader, x_scan_min_re=5.0, x_scan_max_re=30.0, n_scan_points=300, density_variable="rho")` — locate the subsolar magnetopause/bow-shock crossings via a density scan along +x.
-- `fit_shue_model(reader, x_scan_min_re=5.0, x_scan_max_re=30.0, n_scan_points=300, density_variable="rho", alpha=SHUE_ALPHA_DEFAULT)` — fit `r0`/`r_bs`/`alpha` from the subsolar scan; returns the full shue_fit dict.
-- `shue_boundary_r_re(x_re, z_re, r0_re, alpha=SHUE_ALPHA_DEFAULT)` — Shue-model boundary radius at a given angle from the subsolar point.
-- `classify_magnetosphere_regions(vdf_coords_re, densities, r0_re, r_bs_re=None, alpha=SHUE_ALPHA_DEFAULT, lobe_r_min_re=None)` — classify cells into no_density_data/solar_wind/magnetosheath/inner_magnetosphere/lobes/undefined, in that fixed priority order (see `schema.md`). `lobe_r_min_re` (default `r0_re`) is the inner_magnetosphere/lobes split radius -- set larger than `r0` (a dayside-only standoff distance) to keep near-Earth nightside plasma out of `lobes`; the gap between `r0` and `lobe_r_min_re` (and any other unclassified cell) is labeled `undefined` rather than assigned to either. No `boundary_layer`/`margin_di` any more -- superseded by `current_layer`'s physically-detected peak-`|J|` core (`physics/current_layer.py`).
+- `fit_shue_model(reader, x_scan_min_re=5.0, x_scan_max_re=30.0, n_scan_points=300, density_variable="rho", alpha=SHUE_ALPHA_DEFAULT)` — fit `r_mp`/`r_bs`/`alpha` from the subsolar scan; returns the full shue_fit dict.
+- `shue_boundary_r_re(x_re, z_re, r_mp_re, alpha=SHUE_ALPHA_DEFAULT)` — Shue-model boundary radius at a given angle from the subsolar point.
+- `classify_magnetosphere_regions(vdf_coords_re, densities, r_mp_re, r_bs_re=None, alpha=SHUE_ALPHA_DEFAULT, lobe_r_min_re=None)` — classify cells into no_density_data/solar_wind/magnetosheath/inner_magnetosphere/lobes/undefined, in that fixed priority order (see `SCHEMA.md`). `lobe_r_min_re` (default `r_mp_re`) is the inner_magnetosphere/lobes split radius -- set larger than `r_mp` (a dayside-only standoff distance) to keep near-Earth nightside plasma out of `lobes`; the gap between `r_mp` and `lobe_r_min_re` (and any other unclassified cell) is labeled `undefined` rather than assigned to either. No `boundary_layer`/`margin_di` any more -- superseded by `current_layer`'s physically-detected peak-`|J|` core (`physics/current_layer.py`).
 
 ## `vdf_transform.py` — rotation into `(B, v_perp, B×v_perp)` frame + Hermite spectra
 

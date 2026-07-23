@@ -21,6 +21,7 @@ See [`schema.md`](schema.md) and README's "Terminology" section for the
 
 ### Role
 
+
 Sanity-checks the physics-driven labels (`cluster_phys`, from
 `extract_data.py`) by asking: does an unsupervised, label-blind PCA+KMeans
 clustering (`cluster_ml`) on the same VDFs recover similar structure? If
@@ -74,8 +75,11 @@ Only meaningful (and only wired up) when `feature_representation ==
 
 `plot_snapshot_pca.py` always produces: `silhouette_by_k.png`,
 `pca_scatter.png` (PC1-vs-PC2, two colorbars: `cluster_phys` and
-`cluster_ml`), `spatial_smallest_clusters.png`, `cluster_vdf_positions.png`,
-`cluster_vdf_examples.png` (one representative VDF per blind cluster).
+`cluster_ml`), `spatial_smallest_clusters.png`, and
+`cluster_vdf_examples.png` (one representative VDF per blind cluster --
+a combined figure with a spatial-position header row plus each
+representative's velocity-space cuts below, see
+`plot_tools.plot_cluster_vdf_examples`).
 
 When `feature_representation == "hermite"`, it additionally saves (see
 `plot_tools.plot_cluster_hermite_spectra`):
@@ -110,6 +114,70 @@ version showed *why*: `current_layer` and `magnetosheath` genuinely have
 physical difference (structured/non-Maxwellian populations vs.
 quiet/near-Maxwellian ones), not a numerical artifact — which is what
 motivated `sample_normalization` and `moment_feature_weight` above.
+
+### Second stage: SOM within each blind cluster (`run_snapshot_som.py`)
+
+The k=2 KMeans split separates calm from disturbed plasma with perfect
+recall of both disturbed substances, but silhouette scores show no clean
+second elbow — the substances *within* each tier don't separate at the
+KMeans level. `scripts/ml_models/run_snapshot_som.py` probes exactly that
+gap: one Self-Organizing Map per blind cluster (`SOM_CONFIG` in
+`pipeline_config.py`), fit on the saved `pca_scores` of just that
+cluster's samples — the same space the split was found in, so no features
+are rebuilt and no VLSV file is opened (chains off `pca_results.npz`,
+like `plot_snapshot_pca.py`).
+
+Before each SOM is fit, that cluster's samples get a per-tier PCA refit
+truncated to `SOM_CONFIG["n_components"]` — the global PCA's leading
+components are partly spent encoding the calm-vs-disturbed split itself,
+so within one tier the structure of interest hides in later components.
+The truncation is the active ingredient (centering + rotation alone
+leave Euclidean distances, and hence the SOM, unchanged).
+
+Each map is painted two ways in `som_label_maps.png`
+(`plot_tools.plot_som_label_maps`): samples on their best-matching unit
+colored by `cluster_phys` over the U-matrix (dark ridges = boundaries in
+codebook space), and the same samples over a KMeans partition of the
+trained codebook vectors (`n_node_clusters`) — blind "clusters within
+the cluster", weighted by each node's hit count (see `fit_som_map`'s
+docstring: at a few dozen samples spread over dozens of nodes, most
+nodes are empty or singleton-occupied, and an unweighted KMeans lets
+those outvote nodes many samples agreed on). The script scores those
+node-clusters against the expert labels the same way
+`cluster_summary.csv` scores the top-level KMeans clusters, plus an
+adjusted Rand index per tier (1 = expert partition reproduced exactly,
+0 = chance) so `SOM_CONFIG` tuning is a measured comparison rather than
+a visual impression.
+
+On the fixture, at the current defaults (`n_components = 8`,
+`som_shape = (4, 4)`) this recovers structure the flat KMeans `k`-scan
+missed: `solar_wind` forms its own 100%-pure node-cluster in the calm
+tier (ARI 0.40), and `current_layer` concentrates strongly (60-75%
+purity depending on run) in a small node-cluster within the disturbed
+tier (ARI 0.31). Both the hit-weighting and the `(4, 4)` map size were
+verified against actual node-occupancy counts, not chosen by best score
+alone — but the disturbed tier (42 samples) still swings noticeably
+between single-seed configurations (e.g. `som_shape` scanned 0.17-0.31),
+so treat these as the current best-understood defaults for this
+fixture, not a converged optimum; re-validate on a production snapshot.
+
+**Codebook clustering method** (`SOM_CONFIG["node_cluster_method"]`):
+KMeans (default) assumes convex node-clusters in codebook space; DBSCAN
+(`fit_som_map`'s other branch, same hit-count weighting via
+`sample_weight`) doesn't, and can legitimately mark a node `-1` ("noise")
+instead of forcing it into a cluster — worth trying when the map's
+structure looks like a curved ridge rather than blobs. On the fixture,
+hit-weighted DBSCAN at `dbscan_eps = 18` beats the tuned KMeans baseline
+on both tiers (calm ARI 0.430 vs 0.404, disturbed ARI 0.330 vs 0.306).
+`dbscan_eps` must be calibrated against the codebook's own pairwise-
+distance scale, not guessed — an initial scan at eps 0.5-3.0 gave
+identical, misleadingly-fragmented output (one cluster per node) because
+those values sat far below this fixture's actual minimum pairwise
+codebook distance (~4.7-8.9, checked via `scipy.spatial.distance.pdist`
+on `som.get_weights()`); eps values that small can never connect two
+nodes at all. KMeans stays the default in `SOM_CONFIG` pending a decision
+on whether to switch it — this DBSCAN result is measured and reproducible
+on the fixture, not yet validated on a production snapshot.
 
 ## 2. Legacy CNN-dataset PCA (`src/ml_models/dataset_pca.py`)
 

@@ -58,7 +58,7 @@
 - **Keep `docs/*.md` in sync.** Every function-name index in `docs/` exists
   so nobody has to re-read the whole tree to know what's there — update the
   relevant file whenever you add, rename, or remove a function.
-- **New `cluster_phys` categories follow [`schema.md`](schema.md).** It
+- **New `cluster_phys` categories follow [`SCHEMA.md`](SCHEMA.md).** It
   defines what a substance is (name + existence predicate) and the exact
   steps for adding one — read it before adding or changing a label.
 

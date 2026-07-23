@@ -14,7 +14,8 @@ blind approach works.
 """
 
 import numpy as np
-from sklearn.cluster import KMeans
+from minisom import MiniSom
+from sklearn.cluster import DBSCAN, KMeans
 from sklearn.metrics import silhouette_score
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
@@ -85,6 +86,95 @@ def fit_pca_clusters(features, k_range, n_components=20, random_state=1234, feat
         "best_k": best_k,
         "kmeans": best_model,
         "labels": best_model.labels_,
+    }
+
+
+def fit_som_map(
+    features, som_shape=(6, 6), sigma=1.5, learning_rate=0.5, n_iterations=5000, random_state=1234,
+    n_node_clusters=0, node_cluster_method="kmeans", dbscan_eps=1.0, dbscan_min_samples=2,
+):
+    """
+    Train a Self-Organizing Map on features (typically the PCA scores of
+    one blind cluster's samples -- see scripts/ml_models/run_snapshot_som.py)
+    and locate every sample's best-matching unit (BMU).
+
+    A SOM lays its nodes out on a fixed 2D grid but fits their codebook
+    vectors in the FULL feature space, preserving topology: samples that
+    are close in feature space land on nearby nodes. Painting the samples'
+    ground-truth labels onto that grid then shows whether expert-based
+    categories occupy distinct regions of the map -- a finer-grained,
+    nonlinear complement to reading the same labels off a 2-component PCA
+    scatter.
+
+    n_node_clusters > 0 (KMeans) or node_cluster_method="dbscan" (n_node_clusters
+    ignored -- DBSCAN discovers the count) additionally clusters the trained
+    codebook vectors, giving each NODE a cluster id -- coarse structure of
+    the map itself, independent of any ground-truth label. Both methods are
+    weighted by each node's hit count (how many samples had it as their
+    BMU): with only a few dozen samples on e.g. a 4x4=16-node map, several
+    nodes are typically empty or singletons, and their codebook vectors are
+    shaped only by neighborhood pull during training rather than by any
+    real sample -- unweighted clustering gives them an equal vote against
+    nodes several samples agreed on. Zero-weight (empty) nodes still get
+    assigned a cluster label under KMeans (nearest final centroid); DBSCAN
+    can legitimately call a node -1 ("noise", not part of any cluster) --
+    at codebook sizes this small (~16-36 points), that's expected for
+    ordinary boundary nodes, not necessarily a diagnostic problem, since
+    DBSCAN has much less to estimate density from than it's designed for.
+    KMeans assumes convex (roughly spherical) node-clusters in codebook
+    space; DBSCAN doesn't, so it's worth trying if the map's structure
+    looks like a curved/elongated ridge rather than blobs -- but compare
+    the resulting ARI against KMeans's, don't assume better shape-fitting
+    per se means better recovery of the expert labels at this sample size.
+
+    Returns a dict: som, bmu_coords (n_samples, 2) integer node coordinates
+    per sample, u_matrix (som_shape, mean codebook distance to neighbors),
+    node_cluster_grid (som_shape int array with -1 for DBSCAN noise, or
+    None), quantization_error.
+    """
+
+    features = np.asarray(features, dtype=float)
+    n_rows, n_cols = som_shape
+
+    som = MiniSom(
+        n_rows, n_cols, features.shape[1],
+        sigma=sigma, learning_rate=learning_rate, random_seed=random_state,
+    )
+    som.pca_weights_init(features)
+    som.train(features, n_iterations, verbose=False)
+
+    bmu_coords = np.array([som.winner(sample) for sample in features], dtype=int)
+    u_matrix = som.distance_map()
+
+    node_cluster_grid = None
+    if node_cluster_method == "dbscan" or n_node_clusters > 0:
+        codebook = som.get_weights().reshape(n_rows * n_cols, features.shape[1])
+        hit_counts = np.zeros((n_rows, n_cols), dtype=float)
+        for row, col in bmu_coords:
+            hit_counts[row, col] += 1
+        weights = hit_counts.reshape(n_rows * n_cols)
+
+        if node_cluster_method == "dbscan":
+            # DBSCAN's sample_weight makes a node count as `weight` copies
+            # of itself for both the min_samples core-point test and its
+            # neighbors' counts -- the density-based analogue of KMeans's
+            # weighted centroids above. Zero-weight (empty) nodes can still
+            # anchor a DBSCAN cluster geometrically (they're not excluded
+            # the way a zero centroid-weight excludes a KMeans node from
+            # shaping centroids) -- a real difference between the two
+            # methods' handling of empty nodes, not just a style choice.
+            dbscan = DBSCAN(eps=dbscan_eps, min_samples=dbscan_min_samples)
+            node_cluster_grid = dbscan.fit_predict(codebook, sample_weight=weights).reshape(n_rows, n_cols)
+        else:
+            kmeans = KMeans(n_clusters=n_node_clusters, random_state=random_state, n_init=10)
+            node_cluster_grid = kmeans.fit_predict(codebook, sample_weight=weights).reshape(n_rows, n_cols)
+
+    return {
+        "som": som,
+        "bmu_coords": bmu_coords,
+        "u_matrix": u_matrix,
+        "node_cluster_grid": node_cluster_grid,
+        "quantization_error": float(som.quantization_error(features)),
     }
 
 

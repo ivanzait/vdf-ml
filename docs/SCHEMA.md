@@ -1,4 +1,4 @@
-# schema.md — rules for `cluster_phys` substances
+# SCHEMA.md — rules for `cluster_phys` substances
 
 `cluster_phys` (see README's "Terminology" section) is built from a set of
 **substances**. This file defines what a substance is and how to add one,
@@ -14,8 +14,9 @@ substance has exactly two required properties:
 2. **Existence predicate** — a rule that decides, for a given VDF cell,
    whether it belongs to this substance. Not necessarily a single formula:
    `magnetosheath`'s predicate is a Shue-surface distance test;
-   `current_layer`'s is "nearest-matched to a peak-|J| core-plus-margin
-   search coordinate." What matters is that it's a well-defined
+   `current_layer`'s is "exact cellid match against the peak-|J| core"
+   (`core_fraction` is the only lever — no margin/expansion step). What
+   matters is that it's a well-defined
    set-membership test over VDF cells, computable from one snapshot.
 
 Nothing else is required. A substance doesn't need its own plot style, its
@@ -37,16 +38,16 @@ computed, every run, by `classify_magnetosphere_regions`
    shock was fit.
 3. `magnetosheath` — sunward of the magnetopause (Shue surface) but not
    `solar_wind` — everything between the bow shock and the magnetopause.
-4. `inner_magnetosphere` — earthward of the magnetopause AND R < `r0` (R =
-   distance from Earth center, `r0` = the fitted Shue standoff distance) —
+4. `inner_magnetosphere` — earthward of the magnetopause AND R < `r_mp` (R =
+   distance from Earth center, `r_mp` = the fitted Shue standoff distance) —
    a simple spherical cutoff near Earth, not the flared Shue shape.
 5. `lobes` — earthward of the magnetopause AND R >= `lobe_r_min_re`
    (`MAGNETOPAUSE_CONFIG["lobe_r_min_re"]`, default `10.0`) — tail
    lobes/plasma sheet.
 6. `undefined` — everything else: earthward of the magnetopause but
-   neither `inner_magnetosphere` nor `lobes` (the `r0`-to-`lobe_r_min_re`
+   neither `inner_magnetosphere` nor `lobes` (the `r_mp`-to-`lobe_r_min_re`
    gap), plus any other cell that doesn't satisfy any rule above.
-   `lobe_r_min_re` is deliberately larger than `r0` (`r0` is a
+   `lobe_r_min_re` is deliberately larger than `r_mp` (`r_mp` is a
    *dayside-only* standoff distance; applying it as a uniform-angle sphere
    would pull near-Earth nightside plasma — inner magnetosphere/ring
    current — into `lobes`), so the band between them genuinely isn't
@@ -98,10 +99,11 @@ though it can produce more than one label.
 1. Write `find_<name>_cellids(reader, points_config, regions_re=None)` in
    `src/data_proc/labeling/snapshot_labeling.py`, returning a cellid set
    (or a `{label: cellids}` dict if it's a family producing more than one
-   label). Mirror `find_current_layer_cellids`/`find_ground_truth_point_cellids`'s
-   shape: dense-grid or physical detection → physical-unit expansion →
-   nearest-VDF-cell matching (`vdf_tools.get_nearest_vdf_cellid`) — not a
-   hard requirement, just what every substance here happens to do.
+   label). Mirror `find_ground_truth_point_cellids`'s shape (dense-grid
+   detection → physical-unit expansion → nearest-VDF-cell matching via
+   `vdf_tools.get_nearest_vdf_cellid`) or `find_current_layer_cellids`'s
+   (dense-grid detection → exact cellid match, no expansion) — not a hard
+   requirement, just the two shapes every substance here happens to use.
 2. Add a matching `if "<name>" in active_point_substances:` block at each
    of the two call sites that build `point_substance_cellids_by_label` —
    `scripts/data_proc/extract_data.py`'s `main()` and

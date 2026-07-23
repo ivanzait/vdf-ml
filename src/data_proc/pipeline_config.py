@@ -61,7 +61,7 @@ POINTS_CONFIG = {
     # critical-point detector below, needs FLUX_FILE_LOCATION), or both
     # together (later entries win where they overlap). Switching is a
     # one-line edit here, no code changes in extract_data.py/verify_data.py.
-    # See schema.md.
+    # See SCHEMA.md.
     "active_point_substances": ["current_layer"],
     "x_selection": {
         "density_variable": "rho",
@@ -126,11 +126,11 @@ MAGNETOPAUSE_CONFIG = {
     "x_scan_min_re": 5.0,
     "x_scan_max_re": 30.0,
     "n_scan_points": 300,
-    # inner_magnetosphere/lobes split uses this radius instead of r0 (the
-    # *dayside* standoff distance, ~8 R_E) -- r0 alone, applied as a
+    # inner_magnetosphere/lobes split uses this radius instead of r_mp (the
+    # *dayside* standoff distance, ~8 R_E) -- r_mp alone, applied as a
     # uniform-angle sphere, pulls near-Earth nightside plasma (inner
     # magnetosphere/ring current, not real lobe plasma) into "lobes". The
-    # gap between r0 and lobe_r_min_re is labeled "undefined" rather than
+    # gap between r_mp and lobe_r_min_re is labeled "undefined" rather than
     # arbitrarily assigned to either -- see classify_magnetosphere_regions.
     "lobe_r_min_re": 10.0,
 }
@@ -203,4 +203,74 @@ PCA_CONFIG = {
     # to the entire Hermite block (~20 at HERMITE_ORDER=14, since
     # 14**3 - 7 ~= 2737 hermite features -- sqrt(2737/7) ~= 19.8).
     "moment_feature_weight": 10.0,
+}
+
+# Shared by run_snapshot_som.py: one Self-Organizing Map per PCA/KMeans
+# cluster (run_snapshot_pca.py must have run first for this RUN_ID -- the
+# SOMs are fit on its saved pca_scores, i.e. within the same space the
+# calm/disturbed split was found in, not on rebuilt raw features). Painted
+# with metadata.csv's label column, the SOM is a second, finer-grained
+# check of whether expert-based labels separate WITHIN each blind cluster.
+SOM_CONFIG = {
+    # Map shape, shared by both tiers (keeps the two maps comparable side
+    # by side). Verified on the fixture, not just picked by best ARI: node
+    # occupancy for the 42-sample disturbed tier goes empty=8/36,
+    # singleton=19/36 hits at (6,6) -> empty=1/16, singleton=4/16 at (4,4)
+    # (1.17 vs 2.62 samples/node) -- fewer empty/singleton nodes means the
+    # hit-weighted codebook KMeans (see fit_som_map) has less brittle
+    # ground to stand on, which is why (4,4) scores best there (ARI 0.31
+    # vs 0.18-0.27 at larger shapes) while leaving the already-well-
+    # populated 74-sample calm tier's ARI flat (~0.40-0.42 at every shape
+    # tried). Auto-sizing (~5*sqrt(n_samples) nodes) would suggest ~6x6/
+    # 6x7 -- deliberately NOT used here; that rule targets map resolution,
+    # not per-node sample count, and this fixture's small tiers need the
+    # latter.
+    "som_shape": (4, 4),
+    # Per-tier PCA refit: before fitting each cluster's SOM, its samples'
+    # global pca_scores are re-projected by a PCA fit on THAT cluster
+    # alone and truncated to this many components. The global PCA's
+    # leading components are partly spent encoding the calm-vs-disturbed
+    # separation itself, so within one tier the structure of interest
+    # hides in later components; reranking by within-tier variance fixes
+    # that. The truncation is the active ingredient, not the refit --
+    # centering + rotation alone leave Euclidean distances (and hence the
+    # SOM) exactly unchanged; only DROPPING the low-within-tier-variance
+    # directions changes the geometry. None disables (SOM fit directly on
+    # the global pca_scores subset). 8 is a PROVISIONAL single-seed pick
+    # from a fixture scan over {4, 8, 10, 12, None}: the calm tier was
+    # insensitive (ARI 0.28-0.34 across all of them), the disturbed tier
+    # swung non-monotonically (0.05-0.27) -- small-sample noise at 42
+    # samples, not a real optimum. Re-scan with seed averaging (and on a
+    # production snapshot) before trusting this number.
+    "n_components": 8,
+    "sigma": 1.5,
+    "learning_rate": 0.5,
+    "n_iterations": 5000,
+    "random_state": RANDOM_STATE,
+    # Clusters with fewer samples than this get skipped (a SOM over a
+    # handful of points is noise, not a map).
+    "min_cluster_size": 10,
+    # Codebook clustering method -- the "find clusters in the SOM" step,
+    # drawn as node background colors. "kmeans" (skipped if
+    # n_node_clusters == 0 -- the disable switch) assumes convex
+    # node-clusters; "dbscan" (always runs, regardless of
+    # n_node_clusters -- eps/min_samples define it, not a count) doesn't
+    # assume convexity, so it's worth trying if the map's structure looks
+    # like a curved ridge rather than blobs -- at the cost of needing
+    # eps/min_samples tuned instead of a count, and legitimately calling
+    # some nodes -1 ("noise") rather than forcing every node into a
+    # cluster. See fit_som_map's docstring for both methods' hit-count
+    # weighting and their different treatment of empty nodes.
+    "node_cluster_method": "kmeans",
+    "n_node_clusters": 3,
+    # Must sit near the codebook's own pairwise-distance scale (check with
+    # scipy.spatial.distance.pdist(som.get_weights().reshape(-1, n_features))
+    # before trusting a new value) -- too small and every node comes back
+    # as its own cluster, silently and eps-invariantly (see PCA_GUIDE.md).
+    # 18 is the calibrated, fixture-verified value: beats tuned KMeans on
+    # both tiers (ARI 0.430 calm / 0.330 disturbed vs. 0.404 / 0.306), but
+    # "kmeans" stays the default method above pending validation on a
+    # production snapshot.
+    "dbscan_eps": 18,
+    "dbscan_min_samples": 2,
 }

@@ -40,7 +40,6 @@ from src.data_proc.labeling.snapshot_labeling import pick_cluster_representative
 from src.data_proc.plot_tools import (
     plot_cluster_hermite_spectra,
     plot_cluster_vdf_examples,
-    plot_cluster_vdf_positions,
     plot_colormap_with_vdf_markers,
     plot_pca_scatter,
     plot_silhouette_scores,
@@ -132,13 +131,9 @@ def main():
         f"cluster_{label:02d}": cid for label, cid in representative_cellids.items()
     }
     save(
-        "cluster_vdf_positions.png", plot_cluster_vdf_positions,
+        "cluster_vdf_examples.png", plot_cluster_vdf_examples,
         file_location=config.FILE_LOCATION, reader=reader,
         representative_cellids=representative_cellids, boxre=config.PLOT_BOXRE,
-    )
-    save(
-        "cluster_vdf_examples.png", plot_cluster_vdf_examples,
-        reader=reader, representative_cellids=representative_cellids,
         pop=config.POP, vdflim=config.VDFLIM,
     )
 

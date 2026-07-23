@@ -1,16 +1,18 @@
 """
 Plotting library for VLSV snapshots, VDF/Hermite diagnostics, and the
 cluster-plotting pipeline shared by three scripts, each scoring a different
-label source against the same three plot functions:
+label source against the same plot functions:
   1. search area with every VDF cell marked -- plot_colormap_with_vdf_markers
-  2. one representative VDF per cluster, mapped spatially -- plot_cluster_vdf_positions
-  3. example VDFs for each cluster -- plot_cluster_vdf_examples
+  2+3. one representative VDF per cluster, mapped spatially (header row) plus
+       its example velocity-space cuts below -- plot_cluster_vdf_examples,
+       whose header row is plot_cluster_vdf_positions's own drawing logic
+       (_draw_cluster_positions), also callable standalone
 
-plot_combined_clusters (in the same section as step 2/3 above) also backs
+plot_combined_clusters (in the same section as steps 2/3 above) also backs
 scripts/data_proc/extract_data.py's post-extraction overview plot: every
 VDF cell colored by that script's own ground truth, with Shue-model
-boundaries drawn on top. Its steps-2/3 counterpart,
-plot_cluster_vdf_positions/plot_cluster_vdf_examples, backs
+boundaries drawn on top. Its steps-2/3 counterpart, plot_cluster_vdf_examples
+(header + examples combined into one saved image), backs
 scripts/data_proc/verify_data.py the same way (real extraction ground
 truth) and scripts/ml_models/plot_snapshot_pca.py the same way again (blind
 PCA/KMeans clusters instead of ground truth).
@@ -40,6 +42,7 @@ from src.data_proc.labeling.point_labels import (
     get_o_point_cellids_by_method,
     get_vdf_cellids_in_b_perp_di_box,
 )
+from src.data_proc.labeling.snapshot_labeling import pick_cluster_representative_cellids
 from src.data_proc.physics.magnetopause import shue_boundary_r_re
 from src.data_proc.physics.point_topology import (
     find_point_records,
@@ -49,7 +52,7 @@ from src.data_proc.physics.point_topology import (
 from src.data_proc.physics.vdf_transform import (
     DEFAULT_HERMITE_ORDER,
     get_rotated_vdf,
-    vdf_to_hermite_spectra,
+    vdf_to_hermite_spectra_log,
 )
 from src.data_proc.vdf_tools import (
     R_EARTH,
@@ -83,6 +86,21 @@ DEFAULT_SELECTED_POINTS_STYLE = {
     "edgecolor": "black",
     "facecolor": "none",
     "linewidth": 1.5,
+}
+
+# PRL-like typography for publication-bound figures: Times-compatible STIX
+# fonts with matching mathtext, via matplotlib's built-in mathtext engine --
+# deliberately NOT text.usetex, so no external LaTeX install is needed and
+# it coexists with the PTNOLATEX analysator setup. Apply per-figure with
+# plt.rc_context(PRL_STYLE), never plt.rcParams.update, so diagnostic plots
+# elsewhere in this module keep their default look.
+PRL_STYLE = {
+    "font.family": "STIXGeneral",
+    "mathtext.fontset": "stix",
+    "axes.labelsize": 13,
+    "axes.titlesize": 15,
+    "xtick.labelsize": 11,
+    "ytick.labelsize": 11,
 }
 
 
@@ -159,181 +177,173 @@ def plot_colormap_with_vdf_markers(
     return fig
 
 
-def plot_vdf_and_hermite_grid(
-    reader,
-    cellids,
-    coords_re,
-    order=DEFAULT_HERMITE_ORDER,
-    pop="avgs",
-    vdf_cmap="viridis",
-    hermite_cmap="RdBu_r",
-    output_path=None,
-):
-    """Plot side-by-side VDF xz-slices and Hermite-spectra slices, one row per cell."""
+def _draw_vdf_rotation_hermite(fig, ax_raw, ax_rotated, ax_hermite, reader, extractor, cid, title, order, vdf_cmap, hermite_cmap):
+    """Shared per-cell drawing for the raw | rotated | log-Hermite three-panel view: extracts the VDF, rotates it into its local (B, v_perp, B x v_perp) frame, computes vdf_to_hermite_spectra_log (the production representation -- what run_snapshot_pca.py's "hermite" mode actually consumes), and draws the three panels onto caller-supplied axes. Factored out so plot_vdf_rotation_hermite (one representative per label) and plot_vdf_rotation_hermite_grid (manually picked cells) render identically and can't drift apart. Includes the rotation-correctness diagnostics (angle(B,V) on the raw panel, density change on the rotated panel -- density should barely change; a large shift signals a rotation bug)."""
 
-    cellids = np.asarray(cellids)
-    coords_re = np.asarray(coords_re, dtype=float)
-    n_points = len(cellids)
-    if n_points == 0:
-        raise ValueError("No VDF points were selected for the detail plot")
+    vdf = extractor.extract(cid=int(cid), box=-1)
+    v_limits, _dv = get_vdf_plot_axes_parameters(reader=reader, vdf_shape=vdf.shape)
+
+    b_field = get_b_field(reader=reader, cid=int(cid))
+    bulk_velocity = get_bulk_velocity(reader=reader, cid=int(cid))
+    angle_deg = np.degrees(
+        np.arccos(
+            np.clip(
+                np.dot(b_field, bulk_velocity)
+                / (np.linalg.norm(b_field) * np.linalg.norm(bulk_velocity)),
+                -1.0,
+                1.0,
+            )
+        )
+    )
+    rotated_vdf, new_shape, new_v_limits, _rotation_matrix = get_rotated_vdf(
+        vdf=vdf, shape=vdf.shape, v_limits=v_limits,
+        b_field=b_field, bulk_velocity=bulk_velocity,
+    )
+    density_change_pct = 100.0 * (rotated_vdf.sum() - vdf.sum()) / vdf.sum()
+
+    sparsity_threshold = float(reader.read_variable("MinValue", int(cid)))
+    spectra = vdf_to_hermite_spectra_log(
+        vdf=rotated_vdf, shape=new_shape, v_limits=new_v_limits,
+        sparsity_threshold=sparsity_threshold, order=order,
+    )
+
+    raw_slice = create_xz_slice(vdf)
+    raw_slice_plot = np.where(raw_slice > 0, raw_slice, np.nan)
+    extent_raw = np.asarray(v_limits) / 1000.0
+    im0 = ax_raw.imshow(
+        raw_slice_plot.T, origin="lower",
+        extent=[extent_raw[0], extent_raw[3], extent_raw[2], extent_raw[5]],
+        norm=LogNorm(vmin=sparsity_threshold, vmax=raw_slice.max()), cmap=vdf_cmap, 
+    )
+    ax_raw.set_title(f"{title}\nangle(B,V)={angle_deg:.1f} deg", fontsize=9)
+    ax_raw.set_xlabel(r"$v_x$ [km/s]")
+    ax_raw.set_ylabel(r"$v_z$ [km/s]")
+    fig.colorbar(im0, ax=ax_raw, label=r"$f(v)$", fraction=0.046, pad=0.04)
+
+    # In-plane direction of B on the raw (vx, vz) panel: this slice IS the
+    # xz plane, so (bx, bz) is B's real projection onto what's drawn --
+    # the rotated panel's v_parallel axis should visibly line up with it.
+    b_inplane = np.array([b_field[0], b_field[2]])
+    b_inplane_norm = np.linalg.norm(b_inplane)
+    if b_inplane_norm > 0:
+        arrow_tip = 0.35 * float(extent_raw[3]) * b_inplane / b_inplane_norm
+        ax_raw.annotate(
+            "", xy=arrow_tip, xytext=(0.0, 0.0),
+            arrowprops={"arrowstyle": "-|>", "color": "crimson", "linewidth": 1.6},
+        )
+        ax_raw.text(
+            *(1.25 * arrow_tip), r"$\mathbf{B}$", color="crimson",
+            fontsize=12, ha="center", va="center",
+        )
+
+    mid_perp = new_shape[1] // 2
+    rotated_slice = rotated_vdf[:, mid_perp, :]
+    rotated_slice_plot = np.where(rotated_slice > 0, rotated_slice, np.nan)
+    extent_rotated = np.asarray(new_v_limits) / 1000.0
+    im1 = ax_rotated.imshow(
+        rotated_slice_plot.T, origin="lower",
+        extent=[extent_rotated[0], extent_rotated[3], extent_rotated[2], extent_rotated[5]],
+        norm=LogNorm(vmin=sparsity_threshold, vmax=raw_slice.max()), cmap=vdf_cmap,
+    )
+    ax_rotated.set_title(f"Rotated to local B frame\ndensity change: {density_change_pct:+.2f}%", fontsize=9)
+    ax_rotated.set_xlabel(r"$v_{\parallel}$  [km/s]")
+    ax_rotated.set_ylabel(r"$v_{\perp}$ [km/s]")
+    fig.colorbar(im1, ax=ax_rotated, label=r"$f(v)$", fraction=0.046, pad=0.04)
+
+    par_perp = np.sqrt(np.sum(spectra**2, axis=2))
+    vmax = float(par_perp.max()) or 1.0
+    im2 = ax_hermite.imshow(par_perp.T, origin="lower", cmap=hermite_cmap, vmin=0, vmax=vmax)
+    ax_hermite.set_title(f"Hermite spectra (order={order})", fontsize=9)
+    ax_hermite.set_xlabel(r"$m_{\parallel}$ ")
+    ax_hermite.set_ylabel(r"$m_{\perp}$ ")
+    fig.colorbar(im2, ax=ax_hermite, label=r"H($m_{\parallel}$,$m_{\perp}$)", fraction=0.046, pad=0.04)
+
+    for ax in (ax_raw, ax_rotated, ax_hermite):
+        ax.grid(True, alpha=0.25, linestyle="--", linewidth=0.6)
+
+
+def plot_vdf_rotation_hermite(
+    reader, cellids, coords_re, labels, label="magnetosheath",
+    pop="avgs", vdf_cmap="gist_stern", hermite_cmap="gist_stern",
+    order=DEFAULT_HERMITE_ORDER, random_state=None, output_path=None,
+):
+    """
+    Three-panel figure for one representative VDF of `label`: raw VDF
+    xz-slice (left), the same VDF rotated into its local
+    (B, v_perp, B x v_perp) frame (center), and that rotated VDF's
+    log-space Hermite spectra (vdf_to_hermite_spectra_log), reduced to 2D
+    by integrating over the 2nd perpendicular axis (right, same convention
+    as plot_cluster_hermite_spectra). Ties Section "Rotation and
+    Hermite-spectrum processing"'s description to one concrete example.
+    Drawing shared with plot_vdf_rotation_hermite_grid via
+    _draw_vdf_rotation_hermite.
+
+    The representative cell is picked the same way as
+    pick_cluster_representative_cellids (uniformly at random from
+    `label`'s cells, random_state for reproducibility) -- pass cellids/
+    coords_re/labels straight from compute_snapshot_ground_truth or
+    load_labeled_vdfs' metadata, no separate cell-picking step needed.
+    Everything here is computed live from the reader for just this one
+    cell (extraction + rotation + Hermite transform), not read from a
+    saved dataset -- cheap for one cell (~3s, dominated by rotation)
+    even though the same computation is expensive across a whole dataset.
+    """
+
+    representative_cellids = pick_cluster_representative_cellids(
+        vdf_cellids=cellids, labels=labels, random_state=random_state,
+    )
+    if label not in representative_cellids:
+        raise ValueError(
+            f"label {label!r} not found among {sorted(representative_cellids)} -- "
+            "check active_point_substances / the labels actually present this run."
+        )
+    cid = representative_cellids[label]
+    coord_re = np.asarray(coords_re, dtype=float)[np.asarray(cellids) == cid][0]
 
     extractor = VdfExtractor(reader=reader, pop=pop)
-
-    fig, axes = plt.subplots(n_points, 2, figsize=(11, 5 * n_points))
-    axes = np.atleast_2d(axes)
-
-    for row, (cid, coord) in enumerate(zip(cellids, coords_re)):
-        vdf = extractor.extract(cid=int(cid), box=-1)
-        v_limits, _dv = get_vdf_plot_axes_parameters(reader=reader, vdf_shape=vdf.shape)
-        spectra = vdf_to_hermite_spectra(vdf=vdf, shape=vdf.shape, v_limits=v_limits, order=order)
-
-        vdf_slice = create_xz_slice(vdf)
-        vdf_slice_plot = np.where(vdf_slice > 0, vdf_slice, np.nan)
-        extent_km = np.asarray(v_limits) / 1000.0
-
-        ax_vdf = axes[row, 0]
-        im0 = ax_vdf.imshow(
-            vdf_slice_plot.T,
-            origin="lower",
-            extent=[extent_km[0], extent_km[3], extent_km[2], extent_km[5]],
-            norm=LogNorm(),
-            cmap=vdf_cmap,
+    with plt.rc_context(PRL_STYLE):
+        fig, (ax_raw, ax_rotated, ax_hermite) = plt.subplots(1, 3, figsize=(15, 4.5))
+        _draw_vdf_rotation_hermite(
+            fig, ax_raw, ax_rotated, ax_hermite, reader, extractor, cid,
+            title=f"{label} (cid={cid})  coord_re={np.round(coord_re, 2).tolist()}",
+            order=order, vdf_cmap=vdf_cmap, hermite_cmap=hermite_cmap,
         )
-        ax_vdf.set_title(
-            f"VDF xz-slice  cid={int(cid)}  coord_re={np.round(coord, 2).tolist()}"
-        )
-        ax_vdf.set_xlabel("vx [km/s]")
-        ax_vdf.set_ylabel("vz [km/s]")
-        fig.colorbar(im0, ax=ax_vdf, label="f(v)")
 
-        hermite_slice = spectra[:, 0, :]
-        vmax = float(np.abs(hermite_slice).max()) or 1.0
-        ax_h = axes[row, 1]
-        im1 = ax_h.imshow(
-            hermite_slice.T,
-            origin="lower",
-            cmap=hermite_cmap,
-            vmin=-vmax,
-            vmax=vmax,
-        )
-        ax_h.set_title(f"Hermite spectra  ny=0 slice  order={order}")
-        ax_h.set_xlabel("nx")
-        ax_h.set_ylabel("nz")
-        fig.colorbar(im1, ax=ax_h, label="coefficient")
-
-    fig.tight_layout()
-
-    if output_path is not None:
-        fig.savefig(output_path, dpi=150, bbox_inches="tight")
-
+        fig.tight_layout()
+        if output_path is not None:
+            fig.savefig(output_path, dpi=150, bbox_inches="tight")
+            plt.close(fig)
     return fig
 
 
-def plot_vdf_rotation_comparison(
-    reader,
-    cellids,
-    coords_re,
-    pop="avgs",
-    vdf_cmap="viridis",
-    output_path=None,
+def plot_vdf_rotation_hermite_grid(
+    reader, cellids, coords_re,
+    pop="avgs", vdf_cmap="gist_stern", hermite_cmap="viridis",
+    order=DEFAULT_HERMITE_ORDER, output_path=None,
 ):
-    """Plot VDF xz-slices before vs. after (B, v_perp, B x v_perp) rotation, one row per cell -- density should barely change; a large shift signals a rotation bug."""
+    """Same three panels as plot_vdf_rotation_hermite (raw | rotated | log-Hermite, via _draw_vdf_rotation_hermite) but one row per manually picked cell -- the ad-hoc counterpart, for scripts/data_proc/plot_vdf_hermite.py's box/coordinate selection, where no ground-truth label is involved."""
 
     cellids = np.asarray(cellids)
     coords_re = np.asarray(coords_re, dtype=float)
     n_points = len(cellids)
     if n_points == 0:
-        raise ValueError("No VDF points were selected for the rotation comparison")
+        raise ValueError("No VDF points were selected for the rotation/Hermite grid")
 
     extractor = VdfExtractor(reader=reader, pop=pop)
+    with plt.rc_context(PRL_STYLE):
+        fig, axes = plt.subplots(n_points, 3, figsize=(15, 4.5 * n_points), squeeze=False)
 
-    fig, axes = plt.subplots(n_points, 2, figsize=(11, 5 * n_points))
-    axes = np.atleast_2d(axes)
-
-    for row, (cid, coord) in enumerate(zip(cellids, coords_re)):
-        vdf = extractor.extract(cid=int(cid), box=-1)
-        v_limits, _dv = get_vdf_plot_axes_parameters(reader=reader, vdf_shape=vdf.shape)
-
-        b_field = get_b_field(reader=reader, cid=int(cid))
-        bulk_velocity = get_bulk_velocity(reader=reader, cid=int(cid))
-        angle_deg = np.degrees(
-            np.arccos(
-                np.clip(
-                    np.dot(b_field, bulk_velocity)
-                    / (np.linalg.norm(b_field) * np.linalg.norm(bulk_velocity)),
-                    -1.0,
-                    1.0,
-                )
+        for row, (cid, coord) in enumerate(zip(cellids, coords_re)):
+            _draw_vdf_rotation_hermite(
+                fig, axes[row, 0], axes[row, 1], axes[row, 2], reader, extractor, cid,
+                title=f"cid={int(cid)}  coord_re={np.round(coord, 2).tolist()}",
+                order=order, vdf_cmap=vdf_cmap, hermite_cmap=hermite_cmap,
             )
-        )
 
-        rotated_vdf, new_shape, new_v_limits, _rotation_matrix = get_rotated_vdf(
-            vdf=vdf,
-            shape=vdf.shape,
-            v_limits=v_limits,
-            b_field=b_field,
-            bulk_velocity=bulk_velocity,
-        )
-        density_change_pct = 100.0 * (rotated_vdf.sum() - vdf.sum()) / vdf.sum()
-
-        original_slice = create_xz_slice(vdf)
-        original_slice_plot = np.where(original_slice > 0, original_slice, np.nan)
-        extent_km_original = np.asarray(v_limits) / 1000.0
-
-        ax_original = axes[row, 0]
-        im0 = ax_original.imshow(
-            original_slice_plot.T,
-            origin="lower",
-            extent=[
-                extent_km_original[0],
-                extent_km_original[3],
-                extent_km_original[2],
-                extent_km_original[5],
-            ],
-            norm=LogNorm(),
-            cmap=vdf_cmap,
-        )
-        ax_original.set_title(
-            f"Original xz-slice  cid={int(cid)}  coord_re={np.round(coord, 2).tolist()}\n"
-            f"B={np.round(b_field * 1e9, 2).tolist()} nT  "
-            f"V={np.round(bulk_velocity / 1000.0, 1).tolist()} km/s  "
-            f"angle(B,V)={angle_deg:.1f} deg"
-        )
-        ax_original.set_xlabel("vx [km/s]")
-        ax_original.set_ylabel("vz [km/s]")
-        fig.colorbar(im0, ax=ax_original, label="f(v)")
-
-        mid_perp = new_shape[1] // 2
-        rotated_slice = rotated_vdf[:, mid_perp, :]
-        rotated_slice_plot = np.where(rotated_slice > 0, rotated_slice, np.nan)
-        extent_km_rotated = np.asarray(new_v_limits) / 1000.0
-
-        ax_rotated = axes[row, 1]
-        im1 = ax_rotated.imshow(
-            rotated_slice_plot.T,
-            origin="lower",
-            extent=[
-                extent_km_rotated[0],
-                extent_km_rotated[3],
-                extent_km_rotated[2],
-                extent_km_rotated[5],
-            ],
-            norm=LogNorm(),
-            cmap=vdf_cmap,
-        )
-        ax_rotated.set_title(
-            f"Rotated slice (fixed v_perp)  shape={new_shape}\n"
-            f"density change from rotation: {density_change_pct:+.2f}%"
-        )
-        ax_rotated.set_xlabel("v_parallel (B) [km/s]")
-        ax_rotated.set_ylabel("v_perp2 (B x v_perp) [km/s]")
-        fig.colorbar(im1, ax=ax_rotated, label="f(v)")
-
-    fig.tight_layout()
-
-    if output_path is not None:
-        fig.savefig(output_path, dpi=150, bbox_inches="tight")
-
+        fig.tight_layout()
+        if output_path is not None:
+            fig.savefig(output_path, dpi=150, bbox_inches="tight")
+            plt.close(fig)
     return fig
 
 
@@ -1022,45 +1032,45 @@ def draw_snapshot_colormap(ax, file_location, boxre, var="rho"):
     pt.plot.plot_colormap(filename=str(file_location), axes=ax, var=var, boxre=list(boxre))
 
 
-def draw_shue_boundaries(ax, shue_fit, show_r0_circle=True, show_subsolar_marker=False, lobe_r_min_re=None):
+def draw_shue_boundaries(ax, shue_fit, show_r_mp_circle=True, show_subsolar_marker=False, lobe_r_min_re=None):
     """
     Draw the magnetopause/bow-shock Shue curves, plus two independent
     optional circles -- these are two different physical quantities, drawn
     separately, never conflated:
-    - show_r0_circle: R = r0, the fitted Shue *magnetopause standoff
-      distance* (shue_fit["r0_re"]) -- always this value, regardless of
+    - show_r_mp_circle: R = r_mp, the fitted Shue *magnetopause standoff
+      distance* (shue_fit["r_mp_re"]) -- always this value, regardless of
       lobe_r_min_re.
     - lobe_r_min_re: R = lobe_r_min_re, the separate *inner_magnetosphere/
       lobes classification cutoff* (see MAGNETOPAUSE_CONFIG["lobe_r_min_re"],
       classify_magnetosphere_regions) -- only drawn if explicitly given, in
-      a distinct style, since it generally differs from r0 (r0 is a
+      a distinct style, since it generally differs from r_mp (r_mp is a
       dayside-only standoff distance; lobe_r_min_re is deliberately a
       separate, larger radius so nightside plasma near Earth isn't
-      mislabeled "lobes" -- see schema.md).
-    Also optionally the subsolar marker (always at r0).
+      mislabeled "lobes" -- see SCHEMA.md).
+    Also optionally the subsolar marker (always at r_mp).
     """
 
     theta = np.linspace(0, 2.5, 300)
     r_shue_re = shue_boundary_r_re(
-        x_re=np.cos(theta), z_re=np.sin(theta), r0_re=shue_fit["r0_re"], alpha=shue_fit["alpha"],
+        x_re=np.cos(theta), z_re=np.sin(theta), r_mp_re=shue_fit["r_mp_re"], alpha=shue_fit["alpha"],
     )
     ax.plot(r_shue_re * np.cos(theta), r_shue_re * np.sin(theta), color="black", linewidth=1.5, label="Magnetopause")
     ax.plot(r_shue_re * np.cos(theta), -r_shue_re * np.sin(theta), color="black", linewidth=1.5)
 
     if shue_fit["r_bs_re"] is not None:
         r_bs_re = shue_boundary_r_re(
-            x_re=np.cos(theta), z_re=np.sin(theta), r0_re=shue_fit["r_bs_re"], alpha=shue_fit["alpha"],
+            x_re=np.cos(theta), z_re=np.sin(theta), r_mp_re=shue_fit["r_bs_re"], alpha=shue_fit["alpha"],
         )
         ax.plot(r_bs_re * np.cos(theta), r_bs_re * np.sin(theta), color="tab:gray", linewidth=1.5, label="Bow shock")
         ax.plot(r_bs_re * np.cos(theta), -r_bs_re * np.sin(theta), color="tab:gray", linewidth=1.5)
 
     full_circle_theta = np.linspace(0, 2 * np.pi, 300)
 
-    if show_r0_circle:
+    if show_r_mp_circle:
         ax.plot(
-            shue_fit["r0_re"] * np.cos(full_circle_theta), shue_fit["r0_re"] * np.sin(full_circle_theta),
+            shue_fit["r_mp_re"] * np.cos(full_circle_theta), shue_fit["r_mp_re"] * np.sin(full_circle_theta),
             color="tab:blue", linewidth=1.5, linestyle="--",
-            label=f"R = r0 ({shue_fit['r0_re']:.2f} Re, magnetopause standoff)",
+            label=f"R = r_mp ({shue_fit['r_mp_re']:.2f} Re, magnetopause standoff)",
         )
 
     if lobe_r_min_re is not None:
@@ -1072,8 +1082,8 @@ def draw_shue_boundaries(ax, shue_fit, show_r0_circle=True, show_subsolar_marker
 
     if show_subsolar_marker:
         ax.scatter(
-            [shue_fit["r0_re"]], [0], marker="*", s=200, color="black", zorder=5,
-            label=f"subsolar (r0={shue_fit['r0_re']:.2f} Re)",
+            [shue_fit["r_mp_re"]], [0], marker="*", s=200, color="black", zorder=5,
+            label=f"subsolar (r_mp={shue_fit['r_mp_re']:.2f} Re)",
         )
 
 
@@ -1106,7 +1116,7 @@ def plot_combined_clusters(
     boxre=(-30, 15, -10, 10), figsize=(10, 10.5),
     current_layer_records=None, lobe_r_min_re=None,
 ):
-    """All named clusters on one colormap: Shue-fit background regions plus whichever point substance(s) are active (x_point/o_point/x_point_o_point and/or current_layer, see schema.md) on top; no_density_data cells are left unplotted (invalid density, not a real spatial category). "undefined" (the r0-to-lobe_r_min_re gap and any other unclassified cell -- see classify_magnetosphere_regions) is drawn, deliberately visible, so it's easy to check how big that band actually is. Pass current_layer_records (see find_current_layer_cellids) to additionally show the current layer core's actual dense-grid extent -- see draw_current_layer_region. Pass lobe_r_min_re (see MAGNETOPAUSE_CONFIG) so the drawn inner-magnetosphere/lobes cutoff circle matches what classify_magnetosphere_regions actually used, not r0."""
+    """All named clusters on one colormap: Shue-fit background regions plus whichever point substance(s) are active (x_point/o_point/x_point_o_point and/or current_layer, see SCHEMA.md) on top; no_density_data cells are left unplotted (invalid density, not a real spatial category). "undefined" (the r_mp-to-lobe_r_min_re gap and any other unclassified cell -- see classify_magnetosphere_regions) is drawn, deliberately visible, so it's easy to check how big that band actually is. Pass current_layer_records (see find_current_layer_cellids) to additionally show the current layer core's actual dense-grid extent -- see draw_current_layer_region. Pass lobe_r_min_re (see MAGNETOPAUSE_CONFIG) so the drawn inner-magnetosphere/lobes cutoff circle matches what classify_magnetosphere_regions actually used, not r_mp."""
 
     fig = plt.figure(figsize=figsize)
     ax = fig.add_subplot()
@@ -1115,16 +1125,17 @@ def plot_combined_clusters(
     if current_layer_records:
         draw_current_layer_region(ax, current_layer_records)
 
+    marker_size = 60
     region_styles = {
-        "solar_wind": {"label": "Solar wind", "color": "tab:gray", "marker": ".", "s": 22, "zorder": 2},
-        "magnetosheath": {"label": "Magnetosheath", "color": "tab:orange", "marker": ".", "s": 22, "zorder": 2},
-        "lobes": {"label": "Lobes", "color": "tab:purple", "marker": ".", "s": 22, "zorder": 2},
-        "inner_magnetosphere": {"label": "Inner magnetosphere", "color": "tab:blue", "marker": ".", "s": 22, "zorder": 2},
-        "undefined": {"label": "Undefined", "color": "dimgray", "marker": "s", "s": 30, "zorder": 3},
-        "x_point": {"label": "X-points (IDR)", "color": "red", "marker": "x", "s": 130, "zorder": 5},
-        "o_point": {"label": "O-points (dipolarization front)", "color": "gold", "marker": "o", "s": 100, "zorder": 5},
-        "x_point_o_point": {"label": "X+O shared cell", "color": "black", "marker": "*", "s": 220, "zorder": 6},
-        "current_layer": {"label": "Current layer", "color": "deeppink", "marker": "D", "s": 60, "zorder": 5},
+        "solar_wind": {"label": "Solar wind", "color": "tab:gray", "marker": ".", "s": marker_size, "zorder": 2},
+        "magnetosheath": {"label": "Magnetosheath", "color": "tab:orange", "marker": ".", "s": marker_size, "zorder": 2},
+        "lobes": {"label": "Lobes", "color": "tab:purple", "marker": ".", "s": marker_size, "zorder": 2},
+        "inner_magnetosphere": {"label": "Inner magnetosphere", "color": "tab:blue", "marker": ".", "s": marker_size, "zorder": 2},
+        "undefined": {"label": "Undefined", "color": "dimgray", "marker": "s", "s": marker_size, "zorder": 3},
+        "x_point": {"label": "X-points (IDR)", "color": "red", "marker": "x", "s": marker_size, "zorder": 5},
+        "o_point": {"label": "O-points (dipolarization front)", "color": "gold", "marker": "o", "s": marker_size, "zorder": 5},
+        "x_point_o_point": {"label": "X+O shared cell", "color": "black", "marker": "*", "s": marker_size, "zorder": 6},
+        "current_layer": {"label": "Current layer", "color": "deeppink", "marker": "D", "s": marker_size, "zorder": 5},
     }
     for region, style in region_styles.items():
         mask = combined_labels == region
@@ -1137,7 +1148,7 @@ def plot_combined_clusters(
             color=style["color"], marker=style["marker"], s=style["s"], zorder=style["zorder"],
         )
 
-    draw_shue_boundaries(ax, shue_fit, show_r0_circle=True, show_subsolar_marker=False, lobe_r_min_re=lobe_r_min_re)
+    draw_shue_boundaries(ax, shue_fit, show_r_mp_circle=True, show_subsolar_marker=False, lobe_r_min_re=lobe_r_min_re)
 
     ax.xaxis.label.set_size(14)
     ax.yaxis.label.set_size(14)
@@ -1224,29 +1235,121 @@ def plot_pca_scatter(result, cellids, phys_labels, output_path):
     plt.close(fig)
 
 
+def plot_som_label_maps(som_maps, output_path=None):
+    """
+    Per-blind-cluster SOM maps painted with ground-truth labels: one
+    column per blind cluster, top row the U-matrix (mean codebook distance
+    to neighboring nodes, dark ridges = boundaries between map regions),
+    bottom row the node-cluster partition (KMeans on the codebook vectors,
+    omitted if not provided). Samples are drawn on both rows at their
+    best-matching unit, jittered inside the node cell so co-located
+    samples stay countable, colored/markered by their expert label with
+    one shared mapping across every panel -- the SOM analogue of reading
+    cluster_phys off pca_scatter.png.
+
+    som_maps : dict of {panel_title: map_dict}, one entry per blind
+        cluster, where map_dict holds plain arrays (no SOM objects -- this
+        module never imports ml_models): "bmu_coords" (n_samples, 2 int),
+        "u_matrix" (map_rows, map_cols), "phys_labels" (n_samples str),
+        and optionally "node_cluster_grid" (map_rows, map_cols int).
+    """
+
+    if not som_maps:
+        print("No SOM maps to plot.")
+        return
+
+    all_labels = sorted({label for som_map in som_maps.values() for label in som_map["phys_labels"]})
+    colors = plt.cm.tab10(np.linspace(0, 1, len(all_labels))) if len(all_labels) <= 10 else plt.cm.tab20(np.linspace(0, 1, len(all_labels)))
+    markers = ["o", "s", "^", "D", "v", "P", "X", "*", "h", "<", ">", "p"]
+
+    has_node_clusters = any(som_map.get("node_cluster_grid") is not None for som_map in som_maps.values())
+    n_rows = 2 if has_node_clusters else 1
+    n_cols = len(som_maps)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5.2 * n_cols, 4.6 * n_rows), squeeze=False)
+
+    def scatter_samples(ax, som_map):
+        bmu_coords = np.asarray(som_map["bmu_coords"], dtype=float)
+        # Fresh fixed-seed rng per call: the SAME sample must get the SAME
+        # jitter on every panel it appears in (U-matrix row and codebook-
+        # partition row show the same samples), or the two rows silently
+        # look like different data.
+        jitter = np.random.default_rng(0).uniform(-0.3, 0.3, size=bmu_coords.shape)
+        phys_labels = np.asarray(som_map["phys_labels"])
+        for index, label in enumerate(all_labels):
+            mask = phys_labels == label
+            if not mask.any():
+                continue
+            points = bmu_coords[mask] + jitter[mask]
+            ax.scatter(
+                points[:, 0], points[:, 1], color=[colors[index]],
+                marker=markers[index % len(markers)], s=70,
+                edgecolor="black", linewidth=0.6, zorder=3, label=label,
+            )
+
+    for col, (title, som_map) in enumerate(som_maps.items()):
+        u_matrix = np.asarray(som_map["u_matrix"])
+        ax = axes[0, col]
+        # bmu_coords are (row, col) node indices; imshow(u_matrix.T) puts
+        # the node row index on the x axis so the scatter can use them
+        # directly as (x, y) without swapping.
+        im = ax.imshow(u_matrix.T, origin="lower", cmap="Greys", alpha=0.85)
+        fig.colorbar(im, ax=ax, label="U-matrix (codebook distance)", fraction=0.046, pad=0.04)
+        scatter_samples(ax, som_map)
+        ax.set_title(f"{title}\nU-matrix + expert labels", fontsize=9)
+        ax.set_xticks(range(u_matrix.shape[0]))
+        ax.set_yticks(range(u_matrix.shape[1]))
+
+        if has_node_clusters:
+            ax = axes[1, col]
+            node_cluster_grid = som_map.get("node_cluster_grid")
+            if node_cluster_grid is not None:
+                node_cluster_grid = np.asarray(node_cluster_grid)
+                # -1 (DBSCAN "noise", not part of any cluster) must not be
+                # colored by the same linear colormap as real cluster ids
+                # 0..n-1 -- besides being visually misleading (reads as an
+                # ordinary cluster), including it in the color scale's
+                # min/max would compress the real clusters' colors too.
+                # Mask it to render unfilled instead.
+                cmap = matplotlib.colormaps["Pastel2"].copy()
+                cmap.set_bad(color="white")
+                masked_grid = np.ma.masked_equal(node_cluster_grid, -1)
+                vmax = max(int(node_cluster_grid.max()), 0)
+                ax.imshow(masked_grid.T, origin="lower", cmap=cmap, vmin=0, vmax=vmax, alpha=0.9)
+                scatter_samples(ax, som_map)
+                ax.set_title("Codebook partition + expert labels", fontsize=9)
+                ax.set_xticks(range(node_cluster_grid.shape[0]))
+                ax.set_yticks(range(node_cluster_grid.shape[1]))
+            else:
+                ax.axis("off")
+
+    handles = [
+        plt.Line2D(
+            [], [], linestyle="", color=colors[index], marker=markers[index % len(markers)],
+            markersize=8, markeredgecolor="black", label=label,
+        )
+        for index, label in enumerate(all_labels)
+    ]
+    fig.legend(
+        handles=handles, loc="upper center", bbox_to_anchor=(0.5, 0.02),
+        ncol=min(len(all_labels), 4), fontsize=8,
+    )
+    fig.tight_layout()
+    if output_path is not None:
+        fig.savefig(output_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+    return fig
+
+
 # =====================================================================
 # Cluster-plotting pipeline (scripts/ml_models/run_snapshot_pca.py +
 # plot_snapshot_pca.py, and scripts/data_proc/verify_data.py): step 1 is
 # plot_colormap_with_vdf_markers above; steps 2 and 3 below.
 # =====================================================================
 
-def plot_cluster_vdf_positions(
-    file_location, reader, representative_cellids, output_path,
-    boxre=(-30, 15, -10, 10), figsize=(10, 9),
-    current_layer_records=None,
-):
-    """Step 2: colormap with the spatial position of each cluster's representative VDF (same cells as plot_cluster_vdf_examples), one marker per label so the two plots always match. Pass current_layer_records (see find_current_layer_cellids) to additionally show the current layer core's actual dense-grid extent -- see draw_current_layer_region."""
+def _draw_cluster_positions(ax, file_location, reader, representative_cellids, boxre):
+    """Shared drawing logic for the spatial-position plot: colormap + one marker per representative cellid, onto a caller-supplied ax. Factored out so plot_cluster_vdf_positions (standalone) and plot_cluster_vdf_examples (combined header row) render identically and can't drift apart -- see those two docstrings for which one to call. Returns (handles, labels) for the legend rather than placing one itself -- draw_snapshot_colormap forces an equal-aspect axes, so the caller has to compute the legend position from the axes' actual rendered extent (see plot_cluster_vdf_positions/plot_cluster_vdf_examples), not a fixed bbox_to_anchor guess. Deliberately doesn't overlay the current-layer core dot cloud (draw_current_layer_region) -- this plot is about where the representatives were pulled from, not detection extent; see plot_combined_clusters for that."""
 
-    if not representative_cellids:
-        print("No cluster positions to plot.")
-        return
-
-    fig = plt.figure(figsize=figsize)
-    ax = fig.add_subplot()
     draw_snapshot_colormap(ax, file_location, boxre)
-
-    if current_layer_records:
-        draw_current_layer_region(ax, current_layer_records)
 
     labels = sorted(representative_cellids)
     colors = plt.cm.tab10(np.linspace(0, 1, len(labels))) if len(labels) <= 10 else plt.cm.tab20(np.linspace(0, 1, len(labels)))
@@ -1266,21 +1369,45 @@ def plot_cluster_vdf_positions(
         )
 
     handles, plot_labels = ax.get_legend_handles_labels()
-    if current_layer_records:
-        core_handle = ax.scatter([], [], color="deeppink", alpha=0.35, s=20, edgecolor="none")
-        handles.append(core_handle)
-        plot_labels.append(f"Current layer core ({len(current_layer_records)} dense-grid points)")
-    ax.legend(
-        handles, plot_labels, loc="upper left", bbox_to_anchor=(1.22, 1),
-        borderaxespad=0, fontsize=7, labelspacing=1.2,
+    return handles, plot_labels
+
+
+def _place_legend_below(fig, ax, handles, plot_labels, ncol):
+    """fig.legend (figure-fraction coords) anchored just below ax's actual rendered extent -- not ax.legend, and not a fixed bbox_to_anchor guess, because draw_snapshot_colormap's equal-aspect axes can render much shorter than its allotted space for a wide/flat boxre (same issue as plot_combined_clusters's legend, see its comment). Requires a draw (fig.canvas.draw()) to already have happened so get_tightbbox reflects the real layout."""
+
+    axes_bottom_fig_frac = ax.get_tightbbox().transformed(fig.transFigure.inverted()).y0
+    fig.legend(
+        handles, plot_labels, loc="upper center", bbox_to_anchor=(0.5, axes_bottom_fig_frac - 0.01),
+        borderaxespad=0.5, fontsize=7, ncol=ncol, labelspacing=1.4, columnspacing=2.2, handletextpad=0.8,
     )
+
+
+def plot_cluster_vdf_positions(
+    file_location, reader, representative_cellids, output_path,
+    boxre=(-30, 15, -10, 10), figsize=(10, 9),
+):
+    """Step 2: standalone colormap with the spatial position of each cluster's representative VDF (same cells as plot_cluster_vdf_examples, which embeds this same drawing as its header row -- see _draw_cluster_positions)."""
+
+    if not representative_cellids:
+        print("No cluster positions to plot.")
+        return
+
+    fig = plt.figure(figsize=figsize)
+    ax = fig.add_subplot()
+    handles, plot_labels = _draw_cluster_positions(ax, file_location, reader, representative_cellids, boxre)
     fig.tight_layout()
+    fig.canvas.draw()
+    _place_legend_below(fig, ax, handles, plot_labels, ncol=min(len(plot_labels), 4))
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
-def plot_cluster_vdf_examples(reader, representative_cellids, output_path, pop="avgs", vdflim=2e6, row_figsize=(12, 3.6)):
-    """Step 3: one example VDF per cluster label in representative_cellids (from labeling.snapshot_labeling.pick_cluster_representative_cellids), three velocity-space projections per row sliced through each VDF's own peak (not the mesh center, since fast populations sit far from vx=0)."""
+def plot_cluster_vdf_examples(
+    file_location, reader, representative_cellids, output_path,
+    boxre=(-30, 15, -10, 10),
+    pop="avgs", vdflim=2e6, row_figsize=(12, 3.6),
+):
+    """Combined verification figure: a header row with the spatial-position colormap (plot_cluster_vdf_positions's own drawing, via _draw_cluster_positions, so the two never visually disagree), followed by step 3 -- one example VDF per cluster label in representative_cellids (from labeling.snapshot_labeling.pick_cluster_representative_cellids), three velocity-space projections per row sliced through each VDF's own peak (not the mesh center, since fast populations sit far from vx=0). One saved image instead of two, so a reader never has to cross-reference a separate positions plot to see where each example VDF was pulled from."""
 
     if not representative_cellids:
         print("No clusters to plot VDF examples for.")
@@ -1300,9 +1427,29 @@ def plot_cluster_vdf_examples(reader, representative_cellids, output_path, pop="
     ]
 
     n_rows = len(representative_cellids)
-    fig, axes = plt.subplots(
-        n_rows, 3, figsize=(row_figsize[0], row_figsize[1] * n_rows), squeeze=False,
+
+    # draw_snapshot_colormap (inside _draw_cluster_positions) forces an
+    # equal-aspect axes -- for a wide/flat boxre (this fixture's is 6:1),
+    # a header row sized like a normal example row leaves a huge blank gap
+    # below it (the equal-aspect plot shrinks to fit the width, not the
+    # allotted height). Size the header row from boxre's own aspect ratio
+    # instead of a fixed guess, so this adapts to whatever box a given run
+    # actually uses. ~0.6x the row width is left for the actual colormap
+    # (the rest goes to its colorbar + legend, which sit beside it); +1.8in
+    # covers the title/x-axis-label/legend overhang npt captured by the
+    # equal-aspect plot area itself.
+    box_aspect = (boxre[1] - boxre[0]) / max(boxre[3] - boxre[2], 1e-9)
+    header_height_in = max((row_figsize[0] * 0.6) / box_aspect + 1.8, row_figsize[1])
+
+    fig = plt.figure(figsize=(row_figsize[0], header_height_in + row_figsize[1] * n_rows))
+    gridspec = fig.add_gridspec(n_rows + 1, 3, height_ratios=[header_height_in] + [row_figsize[1]] * n_rows)
+
+    header_ax = fig.add_subplot(gridspec[0, :])
+    header_handles, header_labels = _draw_cluster_positions(
+        header_ax, file_location, reader, representative_cellids, boxre,
     )
+
+    axes = np.array([[fig.add_subplot(gridspec[row + 1, col]) for col in range(3)] for row in range(n_rows)])
 
     for row, (label, cid) in enumerate(representative_cellids.items()):
         vdf = extractor.extract(cid=cid)
@@ -1329,6 +1476,8 @@ def plot_cluster_vdf_examples(reader, representative_cellids, output_path, pop="
             ax.set_title(f"{label} (cid={cid}) -- {plane_name}" if col == 0 else plane_name, fontsize=9)
 
     fig.tight_layout()
+    fig.canvas.draw()
+    _place_legend_below(fig, header_ax, header_handles, header_labels, ncol=min(len(header_labels), 4))
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
 

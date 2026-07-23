@@ -45,6 +45,7 @@ cheaper option below already covers the change:
 | Point substance / region classification logic | `plot_nulls.py` (x_o_points) or a tiny synthetic-array snippet (regions, Stage 3) — neither touches VDF extraction at all | Checking label counts against real fixture geometry (`verify_data.py`, next row) |
 | Labelling as a whole, or any change to Stage 3 | `verify_data.py` — recomputes ground truth from the reader directly and only extracts a *handful* of representative VDFs (one per label), never all ~116, never rotation/Hermite | N/A — this already is the fast path; prefer it over `extract_data.py` for labelling-only changes |
 | PCA config (`feature_representation`, `k_range`, weights, `sample_normalization`) | Re-run `run_snapshot_pca.py`/`plot_snapshot_pca.py` against the existing saved dataset — the PCA/KMeans fit itself is sub-second at ~116 samples | The feature array it needs (`X.npy`/`X_rotated.npy`/`X_hermite.npy`) doesn't exist yet for this `RUN_ID` |
+| SOM config (`SOM_CONFIG`: map shape, iterations, node clusters) | Re-run `run_snapshot_som.py` against the existing `pca_results.npz` (~15s, no VLSV file opened) | `pca_results.npz` doesn't exist yet, or the PCA config changed (the SOMs are fit in that run's score space) |
 | Anything, before calling a change done | Full `extract_data.py` run with `BUILD_ROTATED_DATASET`/`BUILD_HERMITE_DATASET` matching what downstream stages need, per PIPELINE.md's orchestrator tier (see "Regression checklist" below) | Always, as the final check — the cheap paths above are for iterating, not for signing off |
 
 `extract_data.py` itself also has a cheap mode: leave
@@ -120,19 +121,24 @@ extraction or labelling.
 
 `scripts/data_proc/plot_vdf_hermite.py` — edit its `PARAMETERS` block to
 select 1-3 cells (by spatial box or explicit coordinates) and run it. Draws
-a 2D colormap with the selected cells marked, each cell's VDF/Hermite-
-spectrum panel, and a before/after rotation comparison — pays rotation's
-~3s/VDF cost for only the cells you asked for, not the whole fixture.
+a 2D colormap with the selected cells marked, plus one row per cell of the
+production representation: raw VDF | rotated into the local B frame |
+log-space Hermite spectra (`plot_tools.plot_vdf_rotation_hermite_grid`,
+the same drawing `plot_vdf_rotation_hermite.py` uses for a label's
+representative) — pays rotation's ~3s/VDF cost for only the cells you
+asked for, not the whole fixture.
 
 ```
 python scripts/data_proc/plot_vdf_hermite.py
 ```
 
 **What good looks like:**
-- The before/after rotation panel: the rotated VDF's bulk-flow direction
-  should align with the plot's marked `v_parallel` axis — a rotation that
-  doesn't visibly straighten the flow means `build_rotation_matrix`/
-  `get_rotated_vdf` regressed.
+- Raw vs. rotated panels: the rotated VDF's bulk-flow direction should
+  align with the marked `v_parallel` axis — a rotation that doesn't
+  visibly straighten the flow means `build_rotation_matrix`/
+  `get_rotated_vdf` regressed. The rotated panel's title prints the
+  density change from rotation — near 0% is healthy; a large shift
+  signals a rotation/interpolation bug.
 - The Hermite-spectrum panel should be smooth/decaying with increasing
   order for a near-Maxwellian population (`solar_wind`/`lobes`), and
   visibly more structured (checkerboard-like) for `current_layer`/
@@ -187,7 +193,7 @@ qualitative shape* (checkerboard decay) is real — `current_layer`/
 
 ## Stage 3 — Labelling (point substances + region classification)
 
-Both point substances (see [`schema.md`](schema.md)) and base-region
+Both point substances (see [`SCHEMA.md`](SCHEMA.md)) and base-region
 classification feed into one label per VDF cell
 (`labeling.snapshot_labeling.combine_ground_truth_labels`). Which point
 substance(s) run is a toggle, `POINTS_CONFIG["active_point_substances"]`
@@ -318,7 +324,7 @@ File: `physics/magnetopause.py` (`find_subsolar_point`, `fit_shue_model`,
 density (no reader/VDF needed at all once you have those two arrays) —
 the fastest way to smoke-test it after a rule change is a tiny synthetic
 `coords_re`/density array in a snippet, checking the returned labels match
-by hand for a few constructed points (e.g. one point just inside `r0`, one
+by hand for a few constructed points (e.g. one point just inside `r_mp`, one
 just outside `lobe_r_min_re`). Against the real fixture, it's exercised by
 `extract_data.py`/`verify_data.py` ("Assembling the dataset" and Stage 4
 below) — its `Label counts:` dict and `all_vdfs.png` plot are built from
@@ -326,7 +332,7 @@ the same Shue fit computed here.
 
 **What good looks like:**
 - The fitted Shue model, independent of the search box (it always scans the
-  full +x axis): on the fixture, `r0 ≈ 7.97 R_E` (magnetopause, density
+  full +x axis): on the fixture, `r_mp ≈ 7.97 R_E` (magnetopause, density
   `1.13e6 → 1.85e5`), `r_bs ≈ 19.34 R_E` (bow shock, `1.10e6 → 2.86e6`, a
   3-4x compression — the theoretical max for a perpendicular MHD shock; far
   outside that range means the bow-shock index picked the wrong extremum).
@@ -346,18 +352,18 @@ the same Shue fit computed here.
   `magnetosheath` count that balloons to most of the box means the bow
   shock isn't being applied (see failure-mode table below).
 - `inner_magnetosphere`/`lobes` split at `MAGNETOPAUSE_CONFIG["lobe_r_min_re"]`
-  (default `10.0 R_E`), *not* `r0` (~`7.97 R_E` on the fixture) — `r0` is a
+  (default `10.0 R_E`), *not* `r_mp` (~`7.97 R_E` on the fixture) — `r_mp` is a
   dayside-only standoff distance; applying it as a uniform-angle sphere
   would mislabel near-Earth nightside plasma as `lobes` (see failure-mode
-  table below). The band between the two circles (`r0 <= R < lobe_r_min_re`)
+  table below). The band between the two circles (`r_mp <= R < lobe_r_min_re`)
   is labeled `undefined` rather than assigned to either — 5 cells on the
   fixture, regardless of which point substance is active (it's a base
   region rule, computed before any point substance is applied).
 - `all_vdfs.png` draws two separate circles, never one standing in for the
-  other: the blue dashed `R = r0` circle (magnetopause standoff, ~`7.97
+  other: the blue dashed `R = r_mp` circle (magnetopause standoff, ~`7.97
   R_E`) and a cyan dotted `R = <lobe_r_min_re>` circle (`10.0 R_E` by
   default) -- lobes fill the tail outside the *cyan* circle, inner
-  magnetosphere is inside it; the blue `r0` circle sits inside that and
+  magnetosphere is inside it; the blue `r_mp` circle sits inside that and
   isn't the classification boundary for either label.
 
 ## Assembling the dataset (`extract_data.py`)
@@ -444,16 +450,20 @@ python scripts/data_proc/verify_data.py
 - Prints `M VDF cells across K labels`, then `Representative cells: [...]`
   — `K` should match the number of distinct labels active this run (base
   regions + whichever point substance(s) `active_point_substances` selects).
-- `vdf_positions.png`: each representative's marker sits inside the region
-  its label implies (e.g. a `magnetosheath` marker between the two Shue
-  circles, a `current_layer` marker on the dot cloud from Stage 3) — a
-  marker sitting somewhere that contradicts its own label means Stage 3's
-  labelling and this plot's cellid lookup have drifted apart.
-- `vdf_examples.png`: each representative's three velocity-space cuts
-  (vx-vy, vx-vz, vy-vz) show a contiguous blob, not scattered noise or an
-  empty panel — same peak-slicing caveat as "Assembling the dataset" above
-  (fast-flowing populations need their own peak index, not the mesh
-  center).
+- `vdf_examples.png` is one combined figure now (`plot_cluster_vdf_examples`,
+  header row via `_draw_cluster_positions`): a standalone `vdf_positions.png`
+  is no longer produced by this script, though `plot_cluster_vdf_positions`
+  is still directly callable if the positions plot alone is ever needed.
+  - Header row: each representative's marker sits inside the region its
+    label implies (e.g. a `magnetosheath` marker between the two Shue
+    circles, a `current_layer` marker on the dot cloud from Stage 3) — a
+    marker sitting somewhere that contradicts its own label means Stage 3's
+    labelling and this plot's cellid lookup have drifted apart.
+  - Rows below: each representative's three velocity-space cuts (vx-vy,
+    vx-vz, vy-vz) show a contiguous blob, not scattered noise or an empty
+    panel — same peak-slicing caveat as "Assembling the dataset" above
+    (fast-flowing populations need their own peak index, not the mesh
+    center).
 
 See also `plot_nulls.py` (Stage 3, X/O sanity) and `plot_vdf_hermite.py`
 (Stage 2, manual VDF/Hermite/rotation drill-down) for other verification
@@ -466,7 +476,7 @@ Files: `src/ml_models/vdf_snapshot_clustering.py`,
 saved dataset from "Assembling the dataset" above for this `RUN_ID` — the
 PCA/KMeans fit itself is sub-second at ~116 samples, so iterating on
 `PCA_CONFIG` never needs a re-extraction, only a re-run of these two
-scripts. See [`pca_guide.md`](pca_guide.md) for the full pipeline
+scripts. See [`PCA_GUIDE.md`](PCA_GUIDE.md) for the full pipeline
 (feature representations, per-sample normalization, moment-feature
 weighting) — this section is the testing checklist, not the design doc.
 
@@ -509,6 +519,62 @@ python scripts/ml_models/plot_snapshot_pca.py
   described in Stage 2's "Correctness check" above, applied to whichever
   clusters/labels this run actually produced.
 
+### Second stage: SOM within each blind cluster
+
+`scripts/ml_models/run_snapshot_som.py` — one Self-Organizing Map per
+blind cluster, fit on `pca_results.npz`'s saved `pca_scores` (needs
+`run_snapshot_pca.py` to have run for this `RUN_ID`; opens no VLSV file,
+~15s on the fixture, so iterating on `SOM_CONFIG` is cheap).
+
+```
+python scripts/ml_models/run_snapshot_som.py
+```
+
+**What good looks like:**
+- Console prints one block per blind cluster (clusters below
+  `min_cluster_size` are skipped with a message, not an error): the
+  per-tier PCA refit line (component count + % of within-tier variance
+  kept — on the fixture, 8 components keep 92% for the calm tier but
+  only ~56% for the more heterogeneous disturbed one), quantization
+  error, and, if `n_node_clusters > 0`, an **adjusted Rand index** plus
+  per-node-cluster expert-label compositions. The ARI is the tuning
+  metric: fixture baseline is ~0.40 (calm) / ~0.31 (disturbed) at
+  `n_components = 8`, `som_shape = (4, 4)`, hit-weighted codebook KMeans
+  (see `fit_som_map`'s docstring and `SOM_CONFIG`'s comment for why —
+  small tiers leave most SOM nodes empty or singleton-occupied, so an
+  unweighted codebook KMeans lets those nodes outvote nodes dozens of
+  samples agreed on; weighting by hit count fixes that, and a smaller
+  map reduces how many nodes are that starved in the first place). Both
+  levers were verified against node-occupancy counts, not picked by
+  best score alone — but the disturbed tier (42 samples) still swings
+  noticeably between single-seed configurations, so treat a clear ARI
+  drop after a change as a regression signal and don't chase
+  per-node-cluster composition anecdotes (they reshuffle between
+  configurations more than the ARI does).
+- `som_label_maps.png`: expert labels should occupy coherent *regions* of
+  each map, not be scattered uniformly — on the fixture's calm cluster,
+  `solar_wind` sits in one isolated corner and `lobes`/
+  `inner_magnetosphere` hold largely distinct territories. Uniformly
+  mixed labels across the whole map would mean the SOM (or the PCA space
+  it's fit in) carries no substance information at this granularity.
+- The same sample must sit at the same jittered position in the U-matrix
+  row and the codebook-partition row — a mismatch means the fixed-seed
+  jitter regressed (see `plot_som_label_maps`'s comment).
+
+**DBSCAN codebook clustering** (`SOM_CONFIG["node_cluster_method"] =
+"dbscan"`, alternative to the default `"kmeans"`): same hit-weighting,
+but doesn't assume convex node-clusters and can mark a node `-1` ("noise")
+instead of forcing it into a cluster — rendered as a white/unfilled cell
+in `som_label_maps.png`'s codebook-partition row, not a solid color.
+`dbscan_eps` needs calibrating against the codebook's actual pairwise-
+distance scale first (`scipy.spatial.distance.pdist` on
+`som.get_weights()`) — an uncalibrated eps below that scale silently
+produces one cluster per node on every value tried (identical,
+eps-invariant output is the tell). On the fixture, `dbscan_eps = 18`
+beats tuned KMeans on both tiers (ARI 0.430 calm / 0.330 disturbed vs.
+0.404 / 0.306) — see `docs/PCA_GUIDE.md` for the full comparison; not yet
+adopted as the default pending validation on a production snapshot.
+
 ## Stage 6 (future) — CNN training / cluster recognition
 
 Not yet built against this pipeline. `scripts/ml_models/train_cnn.py`/
@@ -539,7 +605,7 @@ If a change touches the area named, re-check the specific symptom.
 | `current_layer` core search returns 0 records even though `|J|` clearly peaks somewhere in the search box | `physics/current_layer.py` (`find_current_layer_core_records`) | The dense grid's peak `|J|` was being searched over the *whole* box, including the simulation's inner boundary/vacuum region — the dipole field's strong curvature there produces a numerically large `curl(B)` with no physical current behind it (density is exactly `0`), so it silently won every peak search and then every one of its "core" cells failed the `density > 0` check, leaving nothing. Fixed by restricting the peak-`|J|` search itself to `density > 0` cells, not just filtering after the fact. |
 | `current_layer` finds the dayside magnetopause but never the tail current sheet (or vice versa) even with a search box that spans both | `physics/current_layer.py` (`find_current_layer_core_records`) | A single global `core_fraction * peak(|J|)` threshold lets the strongest structure in the box (usually the dayside magnetopause) swallow the whole search — a real but weaker structure (the tail sheet) never gets close to that peak. Fixed by searching each named box in `current_layer_selection["search_regions_re"]` (e.g. `"dayside"`/`"tail"`) independently, each against its own local peak, then unioning the results. |
 | Lowering `core_fraction` to catch a weak real structure (e.g. the tail sheet) also pulls in a couple of points right next to the inner boundary, at high `|z|` relative to `|x|` | `physics/current_layer.py` (`find_current_layer_core_records`) | Field-aligned currents near the inner simulation boundary are a different physical structure (mapped along B to the ionosphere, not a cross-field current sheet), but a `dayside`/`tail` x-only split doesn't exclude them — they can sit inside either box and, once the threshold is lowered enough, compete with the box's real peak. Recognizable by `R = sqrt(x_re**2 + z_re**2)` a few R_E (on the fixture, `R ~ 4.6 R_E` vs. `R >= 8.2 R_E` for real detections) and by a suspiciously exact, uniform density across all of them (a boundary-condition fill value, not physically-varying plasma). Fixed by `current_layer_selection["min_r_re"]`, excluding cells within that radius of Earth from every sub-region's search before any peak is computed. |
-| `all_vdfs.png`'s only cutoff circle is labeled/positioned at `r0` even though `inner_magnetosphere`/`lobes` were classified against a different radius (`lobe_r_min_re`) | `plot_tools.py` (`draw_shue_boundaries`) | An early version repurposed the single `show_r0_circle` toggle to draw `lobe_r_min_re` *instead of* `r0` when the two differed -- conflating two genuinely different physical quantities (the fitted magnetopause standoff vs. an independently-chosen classification radius) into one circle. Fixed by drawing them as two separate, independently-toggled circles (`show_r0_circle` always draws `r0`; a new `lobe_r_min_re` param draws its own circle, distinct style, only if given), so neither is ever silently swapped for the other. |
+| `all_vdfs.png`'s only cutoff circle is labeled/positioned at `r_mp` even though `inner_magnetosphere`/`lobes` were classified against a different radius (`lobe_r_min_re`) | `plot_tools.py` (`draw_shue_boundaries`) | An early version repurposed the single `show_r_mp_circle` toggle to draw `lobe_r_min_re` *instead of* `r_mp` when the two differed -- conflating two genuinely different physical quantities (the fitted magnetopause standoff vs. an independently-chosen classification radius) into one circle. Fixed by drawing them as two separate, independently-toggled circles (`show_r_mp_circle` always draws `r_mp`; a new `lobe_r_min_re` param draws its own circle, distinct style, only if given), so neither is ever silently swapped for the other. |
 | `feature_representation = "hermite"` PCA collapses to `Best k = 2`, one giant cluster (nearly all samples) plus one or two singleton outliers, despite a *higher* silhouette score than the raw-pixel baseline | `ml_models/vdf_snapshot_clustering.py` (`fit_pca_clusters`'s `StandardScaler`) vs. `physics/vdf_transform.py` (`vdf_to_hermite_spectra`) | The raw (non-log) Hermite spectra of a VDF scale ~linearly with that VDF's own density (the `(0,0,0)` coefficient IS, up to a constant, the density) -- u/vth normalization removes position/width as confounds but not overall amplitude. `StandardScaler` treats every coefficient as equally informative, so the one or two samples with genuinely unusual density dominate variance and every other coefficient (the real shape information) gets drowned out -- the "scale, not shape" confound this representation was meant to fix, just showing up through density instead of pixel position. Fixed by projecting `log10(vdf)` instead of the raw linear `vdf` (`vdf_to_hermite_spectra_log`, log-compresses the dynamic range the same way the raw-pixel feature path already does) rather than trying to normalize the raw spectra after the fact. |
 | Log-space Hermite spectra have magnitude ~1e9-1e10, dwarfing every other sample, even after the log fix above | `physics/vdf_transform.py` (`vdf_to_hermite_spectra_log`) | Substituting `log10(sparsity_threshold)` as a literal floor value for background cells (instead of subtracting it) integrates a huge sample-independent constant against every Hermite basis function over the ~99.85%-empty grid — the result is dominated by each sample's own basis-normalization overlap with that constant, not real VDF shape. Fixed by computing `log10(vdf/sparsity_threshold)` so background cells map to exactly `0` (compact support preserved), not a large floor value. |
 | Two independent PCA runs on the same physical clusters give visibly different-scale results with no config change, tracing back to `current_layer`/`magnetosheath` specifically | `ml_models/vdf_snapshot_clustering.py` / feature engineering | Not a bug — a genuine two-tier physical amplitude difference: `current_layer`/`magnetosheath` (structured, non-Maxwellian) have Hermite spectra ~6-9x larger in magnitude than `lobes`/`solar_wind`/`inner_magnetosphere`/`undefined` (quiet, near-Maxwellian), confirmed via `plot_cluster_hermite_spectra` to be the *same qualitative shape*, just different scale. Fixed (where it caused degenerate clustering) via per-sample normalization (`sample_normalization = "standard"`) before the per-feature `StandardScaler`. |

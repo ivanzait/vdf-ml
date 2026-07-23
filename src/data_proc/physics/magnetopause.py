@@ -1,18 +1,18 @@
 """
 Solar wind / magnetosheath / inner-magnetosphere classification via
-subsolar-anchored Shue et al. (1998)-shaped surfaces: r(theta) = r0 * (2 / (1
+subsolar-anchored Shue et al. (1998)-shaped surfaces: r(theta) = r_mp * (2 / (1
 + cos(theta)))**alpha, theta measured from the Sun-Earth line (+x). Both the
 magnetopause and the bow shock use this same functional shape (a common
 simplification -- real bow shocks are closer to a hyperboloid, but this
 avoids a second angular fit), anchored at their own subsolar standoff
-distances (r0, r_bs) and sharing the canonical alpha (this run has no solar
+distances (r_mp, r_bs) and sharing the canonical alpha (this run has no solar
 wind monitor to fit alpha from, per SHUE_ALPHA_DEFAULT).
 
 The flared surfaces only decide the solar-wind/magnetosheath split (that
 boundary genuinely flares with angle); "inner_magnetosphere"/"lobes" are
-then simple spheres around Earth (R < r0 / R >= lobe_r_min_re), not the
+then simple spheres around Earth (R < r_mp / R >= lobe_r_min_re), not the
 flared shape -- see classify_magnetosphere_regions for the full priority
-order, including the "undefined" catch-all for the r0-to-lobe_r_min_re gap.
+order, including the "undefined" catch-all for the r_mp-to-lobe_r_min_re gap.
 """
 
 import numpy as np
@@ -71,7 +71,7 @@ def find_subsolar_point(reader, x_scan_min_re=5.0, x_scan_max_re=30.0, n_scan_po
 def fit_shue_model(reader, x_scan_min_re=5.0, x_scan_max_re=30.0, n_scan_points=300, density_variable="rho", alpha=SHUE_ALPHA_DEFAULT):
     """
     Fit subsolar-anchored Shue-shaped surfaces for the magnetopause and bow
-    shock: r0/r_bs from the detected density crossings, both using the
+    shock: r_mp/r_bs from the detected density crossings, both using the
     canonical alpha. r_bs_re is None if no bow shock crossing was found.
     """
 
@@ -83,25 +83,25 @@ def fit_shue_model(reader, x_scan_min_re=5.0, x_scan_max_re=30.0, n_scan_points=
         density_variable=density_variable,
     )
     return {
-        "r0_re": subsolar["magnetopause"]["x_re"],
+        "r_mp_re": subsolar["magnetopause"]["x_re"],
         "r_bs_re": subsolar["bow_shock"]["x_re"] if subsolar["bow_shock"] is not None else None,
         "alpha": float(alpha),
         "subsolar": subsolar,
     }
 
 
-def shue_boundary_r_re(x_re, z_re, r0_re, alpha=SHUE_ALPHA_DEFAULT):
-    """Shue et al. (1998) magnetopause radius toward (x_re, z_re): r0 * (2 / (1 + cos(theta)))**alpha."""
+def shue_boundary_r_re(x_re, z_re, r_mp_re, alpha=SHUE_ALPHA_DEFAULT):
+    """Shue et al. (1998) magnetopause radius toward (x_re, z_re): r_mp * (2 / (1 + cos(theta)))**alpha."""
 
     x_re = np.asarray(x_re, dtype=float)
     z_re = np.asarray(z_re, dtype=float)
     r_re = np.sqrt(x_re**2 + z_re**2)
     cos_theta = np.divide(x_re, r_re, out=np.zeros_like(r_re), where=r_re > 0)
 
-    return r0_re * (2.0 / (1.0 + cos_theta)) ** alpha
+    return r_mp_re * (2.0 / (1.0 + cos_theta)) ** alpha
 
 
-def classify_magnetosphere_regions(vdf_coords_re, densities, r0_re, r_bs_re=None, alpha=SHUE_ALPHA_DEFAULT, lobe_r_min_re=None):
+def classify_magnetosphere_regions(vdf_coords_re, densities, r_mp_re, r_bs_re=None, alpha=SHUE_ALPHA_DEFAULT, lobe_r_min_re=None):
     """
     Label each VDF cell by a fixed priority order (current_layer/x_o_points
     take priority over all of these -- applied later, outside this
@@ -117,17 +117,17 @@ def classify_magnetosphere_regions(vdf_coords_re, densities, r0_re, r_bs_re=None
       everything sunward of the magnetopause is "magnetosheath" instead.
     - "magnetosheath": sunward of the magnetopause (Shue surface) but not
       solar_wind -- everything between the bow shock and the magnetopause.
-    - "inner_magnetosphere": earthward of the magnetopause AND R < r0 (R =
-      distance from Earth center, r0 = the Shue standoff distance) -- a
+    - "inner_magnetosphere": earthward of the magnetopause AND R < r_mp (R =
+      distance from Earth center, r_mp = the Shue standoff distance) -- a
       simple spherical cutoff near Earth, not the flared Shue shape.
     - "lobes": earthward of the magnetopause AND R >= lobe_r_min_re
-      (defaults to r0 if not given) -- tail lobes/plasma sheet.
+      (defaults to r_mp if not given) -- tail lobes/plasma sheet.
     - "undefined": earthward of the magnetopause but neither
-      inner_magnetosphere nor lobes -- i.e. r0 <= R < lobe_r_min_re, when
-      lobe_r_min_re > r0. r0 is a *dayside-only* standoff distance;
+      inner_magnetosphere nor lobes -- i.e. r_mp <= R < lobe_r_min_re, when
+      lobe_r_min_re > r_mp. r_mp is a *dayside-only* standoff distance;
       lobe_r_min_re is deliberately set larger (e.g. 10.0) so
       near-Earth nightside plasma doesn't get mislabeled "lobes" (see
-      schema.md) -- but that means the band between them genuinely isn't
+      SCHEMA.md) -- but that means the band between them genuinely isn't
       confidently either category, so it's left unlabeled rather than
       arbitrarily assigned. This is also the catch-all for any other cell
       that doesn't satisfy any rule above.
@@ -142,8 +142,8 @@ def classify_magnetosphere_regions(vdf_coords_re, densities, r0_re, r_bs_re=None
     x_re = vdf_coords_re[:, 0]
     z_re = vdf_coords_re[:, 2]
     r_re = np.sqrt(x_re**2 + z_re**2)
-    r_shue_re = shue_boundary_r_re(x_re=x_re, z_re=z_re, r0_re=r0_re, alpha=alpha)
-    inner_lobe_boundary_re = r0_re if lobe_r_min_re is None else float(lobe_r_min_re)
+    r_shue_re = shue_boundary_r_re(x_re=x_re, z_re=z_re, r_mp_re=r_mp_re, alpha=alpha)
+    inner_lobe_boundary_re = r_mp_re if lobe_r_min_re is None else float(lobe_r_min_re)
 
     densities = np.asarray(densities, dtype=float)
     positive_density = densities > 0
@@ -155,13 +155,13 @@ def classify_magnetosphere_regions(vdf_coords_re, densities, r0_re, r_bs_re=None
     earthward_mask = positive_density & (r_re <= r_shue_re)
 
     if r_bs_re is not None:
-        r_bow_shock_re = shue_boundary_r_re(x_re=x_re, z_re=z_re, r0_re=r_bs_re, alpha=alpha)
+        r_bow_shock_re = shue_boundary_r_re(x_re=x_re, z_re=z_re, r_mp_re=r_bs_re, alpha=alpha)
         solar_wind_mask = sunward_mask & (r_re > r_bow_shock_re)
     else:
         solar_wind_mask = np.zeros(len(x_re), dtype=bool)
     magnetosheath_mask = sunward_mask & ~solar_wind_mask
 
-    inner_mask = earthward_mask & (r_re < r0_re)
+    inner_mask = earthward_mask & (r_re < r_mp_re)
     lobe_mask = earthward_mask & (r_re >= inner_lobe_boundary_re)
 
     labels[magnetosheath_mask] = "magnetosheath"

@@ -3,11 +3,13 @@
 # Edit the PARAMETERS block below, then run. No YAML config file involved.
 #
 # Manual VDF drill-down: pick cells by spatial box or explicit coordinates,
-# then plot a 2D colormap with those cells marked, each cell's VDF/Hermite-
-# spectrum panel, and a before/after (B, v_perp, B x v_perp) rotation
-# comparison. For "which cells got labeled what" (no Hermite/rotation), use
-# extract_data.py (produces that plot as part of extraction) or
-# verify_data.py instead.
+# then plot a 2D colormap with those cells marked, plus one row per cell of
+# the production representation: raw VDF | rotated into its local
+# (B, v_perp, B x v_perp) frame | log-space Hermite spectra (the same
+# drawing plot_vdf_rotation_hermite.py uses for a label's representative --
+# this script is its manual-selection counterpart). For "which cells got
+# labeled what" (no Hermite/rotation), use extract_data.py (produces that
+# plot as part of extraction) or verify_data.py instead.
 import os
 import sys
 from pathlib import Path
@@ -32,8 +34,7 @@ except ImportError:
 
 from src.data_proc.plot_tools import (
     plot_colormap_with_vdf_markers,
-    plot_vdf_and_hermite_grid,
-    plot_vdf_rotation_comparison,
+    plot_vdf_rotation_hermite_grid,
     select_vdf_points,
 )
 from src.data_proc.vdf_tools import get_vdf_cells_with_coords_re
@@ -72,9 +73,8 @@ COLORMAP_CONFIG = {
 
 HERMITE_ORDER = 22
 POP = "avgs"
-ROTATION_COMPARISON_ENABLED = True
 VDF_CMAP = "viridis"
-HERMITE_CMAP = "RdBu_r"
+HERMITE_CMAP = "viridis"
 
 # ------------------------------------------------------------------------
 
@@ -110,8 +110,8 @@ def main():
     if len(selected_cellids) == 0:
         return
 
-    detail_output_path = OUTPUT_DIR / "vdf_and_hermite.png"
-    plot_vdf_and_hermite_grid(
+    detail_output_path = OUTPUT_DIR / "vdf_rotation_hermite.png"
+    plot_vdf_rotation_hermite_grid(
         reader=reader,
         cellids=selected_cellids,
         coords_re=selected_coords_re,
@@ -121,19 +121,7 @@ def main():
         hermite_cmap=HERMITE_CMAP,
         output_path=detail_output_path,
     )
-    print(f"Saved VDF/Hermite detail plot to: {detail_output_path}")
-
-    if ROTATION_COMPARISON_ENABLED:
-        rotation_output_path = OUTPUT_DIR / "rotation_comparison.png"
-        plot_vdf_rotation_comparison(
-            reader=reader,
-            cellids=selected_cellids,
-            coords_re=selected_coords_re,
-            pop=POP,
-            vdf_cmap=VDF_CMAP,
-            output_path=rotation_output_path,
-        )
-        print(f"Saved rotation comparison plot to: {rotation_output_path}")
+    print(f"Saved raw | rotated | Hermite detail plot to: {detail_output_path}")
 
 
 if __name__ == "__main__":
